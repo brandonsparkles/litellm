@@ -159,15 +159,16 @@ impl RedisSettings {
         let block: Kwargs = block
             .into_iter()
             .filter_map(|(key, entry)| {
-                let value = environment_reference(&entry.value, lookup)?;
-                Some((key, Entry { value, ..entry }))
+                let value = environment_reference(&entry.value, lookup);
+                (!value.is_null() || keeps_explicit_none(cache, &key))
+                    .then(|| (key, Entry { value, ..entry }))
             })
             .collect();
         let environment_kwargs = environment_kwargs(lookup);
         let names_a_target = ["host", "startup_nodes", "sentinel_nodes"]
             .iter()
-            .any(|key| block.contains_key(*key));
-        let drop_environment_url = names_a_target && !block.contains_key("url");
+            .any(|key| is_set(&block, key));
+        let drop_environment_url = names_a_target && !is_set(&block, "url");
         let merged: Kwargs = environment_kwargs
             .into_iter()
             .filter(|(key, _)| !(key == "url" && drop_environment_url))
@@ -176,7 +177,7 @@ impl RedisSettings {
         reject_unsupported(&merged)?;
         warn_ignored(&merged);
 
-        let startup_nodes = match merged.get("startup_nodes") {
+        let startup_nodes = match configured(&merged, "startup_nodes") {
             Some(entry) => Some(
                 cluster_nodes(&entry.value)
                     .ok_or_else(|| invalid(&entry.source, Expected::StartupNodes))?,
@@ -199,9 +200,10 @@ impl RedisSettings {
         };
         let auth = auth::redis_auth(&merged, lookup, environment, uses_tls)?;
         let gcp_ca_certs = match &auth {
-            RedisAuth::GcpIam { .. } if ssl => text_value(&merged, "gcp_ssl_ca_certs")
-                .or_else(|| keys::fallback_value("gcp_ssl_ca_certs", lookup))
-                .filter(|path| !path.is_empty()),
+            RedisAuth::GcpIam { .. } if ssl => {
+                text_or_fallback(&merged, "gcp_ssl_ca_certs", lookup)
+                    .filter(|path| !path.is_empty())
+            }
             _ => None,
         };
         let tls_options = tls::tls_options(&merged, gcp_ca_certs)?;
@@ -462,15 +464,59 @@ fn environment_kwargs(lookup: &dyn Lookup) -> Kwargs {
         .collect()
 }
 
-fn environment_reference(value: &Value, lookup: &dyn Lookup) -> Option<Value> {
+// load_config resolves os.environ/ to None when unset, so a missing reference is a null like any other
+fn environment_reference(value: &Value, lookup: &dyn Lookup) -> Value {
     match value {
         Value::String(text) => match text.strip_prefix("os.environ/") {
-            Some(name) => lookup.get(name).map(Value::String),
-            None => Some(value.clone()),
+            Some(name) => lookup.get(name).map_or(Value::Null, Value::String),
+            None => value.clone(),
         },
-        Value::Null => None,
-        _ => Some(value.clone()),
+        _ => value.clone(),
     }
+}
+
+// coordination_redis reaches redis-py through model_dump(exclude_none=True), so every null is dropped. Cache
+// and RedisCache drop a null only for the parameters they name, and pass any other key on as an explicit None
+// that overrides the REDIS_* environment value
+fn keeps_explicit_none(cache: bool, key: &str) -> bool {
+    const NAMED_BY_CACHE: &[&str] = &[
+        "host",
+        "port",
+        "password",
+        "socket_timeout",
+        "startup_nodes",
+        "namespace",
+        "gcp_service_account",
+        "gcp_ssl_ca_certs",
+    ];
+    cache && !NAMED_BY_CACHE.contains(&key)
+}
+
+fn is_set(kwargs: &Kwargs, key: &str) -> bool {
+    kwargs.get(key).is_some_and(|entry| !entry.value.is_null())
+}
+
+// Python chains these settings with `or`, so a falsy configured value ("", [], 0, False) falls through too
+fn configured<'a>(kwargs: &'a Kwargs, key: &str) -> Option<&'a Entry> {
+    kwargs.get(key).filter(|entry| truthy(&entry.value))
+}
+
+fn truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => number.as_f64().is_some_and(|number| number != 0.0),
+        Value::String(text) => !text.is_empty(),
+        Value::Sequence(items) => !items.is_empty(),
+        Value::Mapping(entries) => !entries.is_empty(),
+        Value::Tagged(_) => true,
+    }
+}
+
+fn text_or_fallback(kwargs: &Kwargs, key: &str, lookup: &dyn Lookup) -> Option<String> {
+    configured(kwargs, key)
+        .and_then(|entry| as_text(&entry.value))
+        .or_else(|| keys::fallback_value(key, lookup))
 }
 
 fn as_text(value: &Value) -> Option<String> {

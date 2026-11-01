@@ -2,7 +2,7 @@ use litellm_redis_types::ClusterNode as RedisNode;
 use litellm_secret_value::SecretValue;
 
 use super::{
-    Expected, Kwargs, Lookup, RedisError, as_text, invalid, keys, secret_value, text_value,
+    Expected, Kwargs, Lookup, RedisError, as_text, configured, invalid, keys, text_or_fallback,
 };
 use crate::Value;
 
@@ -16,22 +16,26 @@ pub(super) fn sentinel_target(
     merged: &Kwargs,
     lookup: &dyn Lookup,
 ) -> Result<Option<SentinelTarget>, RedisError> {
-    let (nodes, source) = match merged.get("sentinel_nodes") {
-        Some(entry) => (sentinel_nodes(&entry.value), entry.source.as_str()),
-        None => match keys::fallback("sentinel_nodes", lookup) {
-            Some((source, json)) => (sentinel_nodes(&Value::String(json)), source),
-            None => return Ok(None),
-        },
+    let (nodes, source) = match (
+        configured(merged, "sentinel_nodes"),
+        keys::fallback("sentinel_nodes", lookup),
+        merged
+            .get("sentinel_nodes")
+            .filter(|entry| !entry.value.is_null()),
+    ) {
+        (Some(entry), _, _) => (sentinel_nodes(&entry.value), entry.source.as_str()),
+        (None, Some((source, json)), _) => (sentinel_nodes(&Value::String(json)), source),
+        (None, None, Some(empty)) => (None, empty.source.as_str()),
+        (None, None, None) => return Ok(None),
     };
     let nodes = nodes.ok_or_else(|| invalid(source, Expected::SentinelNodes))?;
-    let service_name = text_value(merged, "service_name")
-        .or_else(|| keys::fallback_value("service_name", lookup))
-        .ok_or(RedisError::NoSentinelService)?;
+    let service_name =
+        text_or_fallback(merged, "service_name", lookup).ok_or(RedisError::NoSentinelService)?;
     Ok(Some(SentinelTarget {
         sentinels: nodes,
         service_name,
-        sentinel_password: secret_value(merged, "sentinel_password")
-            .or_else(|| keys::fallback_value("sentinel_password", lookup).map(SecretValue::new)),
+        sentinel_password: text_or_fallback(merged, "sentinel_password", lookup)
+            .map(SecretValue::new),
     }))
 }
 

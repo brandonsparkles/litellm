@@ -41,11 +41,21 @@ fn resolve(
 }
 
 fn resolve_cache(yaml: &str) -> Result<ResolvedRedis, RedisError> {
+    resolve_cache_in(yaml, &[])
+}
+
+fn resolve_cache_in(yaml: &str, environment: &[(&str, &str)]) -> Result<ResolvedRedis, RedisError> {
+    let lookup = |name: &str| {
+        environment
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| (*value).to_owned())
+    };
     let config = Config::from_yaml(yaml).unwrap();
     match config.litellm_settings.cache_params.unwrap() {
         CacheSettings::Redis(settings) => settings.resolve_cache(
-            &SecretSnapshot::read(settings.secret_names(), &|_: &str| None),
-            &|_: &str| None,
+            &SecretSnapshot::read(settings.secret_names(), &lookup),
+            &lookup,
         ),
         CacheSettings::Other(_) => panic!("expected a Redis cache"),
     }
@@ -108,6 +118,16 @@ fn cluster_ports(resolved: &ResolvedRedis) -> Vec<u16> {
     "general_settings:\n  coordination_redis:\n    host: os.environ/COORD_HOST\n    port: os.environ/COORD_PORT",
     &[("COORD_HOST", "referenced"), ("COORD_PORT", "6400")],
     "host:referenced:6400:0:false::none"
+)]
+#[case::empty_startup_nodes_fall_back_to_the_environment(
+    "general_settings:\n  coordination_redis:\n    startup_nodes: []",
+    &[("REDIS_CLUSTER_NODES", r#"[{"host":"node-a","port":7000}]"#)],
+    "cluster:node-a:7000"
+)]
+#[case::an_empty_service_name_falls_back_to_the_environment(
+    "general_settings:\n  coordination_redis:\n    sentinel_nodes: [[sentinel-a, 26379]]\n    service_name: \"\"",
+    &[("REDIS_SERVICE_NAME", "primary")],
+    "sentinel:primary"
 )]
 #[case::a_null_host_falls_back_to_the_environment(
     "general_settings:\n  coordination_redis:\n    host: null",
@@ -864,4 +884,38 @@ fn the_azure_username_comes_from_the_process_environment_like_python(
         "{:?}",
         resolved.auth
     );
+}
+
+#[rstest]
+#[case::coordination_drops_the_null(
+    "general_settings:\n  coordination_redis:\n    host: redis\n    ssl: null",
+    false,
+    true
+)]
+#[case::cache_passes_an_unnamed_null_on(
+    "litellm_settings:\n  cache_params:\n    type: redis\n    host: redis\n    ssl: null",
+    true,
+    false
+)]
+#[case::cache_drops_a_null_it_names(
+    "litellm_settings:\n  cache_params:\n    type: redis\n    host: null\n    ssl: true",
+    true,
+    true
+)]
+fn a_null_overrides_the_environment_only_where_python_passes_it_on(
+    #[case] yaml: &str,
+    #[case] cache: bool,
+    #[case] tls: bool,
+) {
+    let environment = [("REDIS_HOST", "environment"), ("REDIS_SSL", "true")];
+    let resolved = match cache {
+        true => resolve_cache_in(yaml, &environment),
+        false => resolve(yaml, &environment),
+    }
+    .unwrap();
+
+    let Endpoint::Host(host) = resolved.endpoint else {
+        panic!("expected a host endpoint, got {:?}", resolved.endpoint);
+    };
+    assert_eq!(host.tls.is_some(), tls);
 }

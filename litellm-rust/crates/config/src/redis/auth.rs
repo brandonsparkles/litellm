@@ -1,6 +1,8 @@
 use litellm_secret_value::SecretValue;
 
-use super::{Kwargs, Lookup, RedisError, bool_value, keys, secret_value, text_value};
+use super::{
+    Kwargs, Lookup, RedisError, bool_value, is_set, secret_value, text_or_fallback, text_value,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum RedisAuth {
@@ -38,14 +40,11 @@ pub(super) fn redis_auth(
     environment: &dyn Lookup,
     uses_tls: bool,
 ) -> Result<RedisAuth, RedisError> {
-    if merged.contains_key("credential_provider") {
+    if is_set(merged, "credential_provider") {
         return Ok(RedisAuth::Host);
     }
-    let gcp = text_value(merged, "gcp_service_account")
-        .filter(|account| !account.is_empty())
-        .or_else(|| keys::fallback_value("gcp_service_account", lookup));
-    let azure = text_value(merged, "azure_redis_ad_token")
-        .or_else(|| keys::fallback_value("azure_redis_ad_token", lookup))
+    let gcp = text_or_fallback(merged, "gcp_service_account", lookup);
+    let azure = text_or_fallback(merged, "azure_redis_ad_token", lookup)
         .is_some_and(|enabled| enabled.eq_ignore_ascii_case("true"));
     let aws = bool_value(merged, "aws_iam_auth");
     match (gcp, azure, aws) {
@@ -69,12 +68,9 @@ pub(super) fn redis_auth(
                 );
             }
             Ok(RedisAuth::AzureAd(AzureAdAuth {
-                client_id: present(merged, "azure_client_id")
-                    .or_else(|| keys::fallback_value("azure_client_id", lookup)),
-                tenant_id: present(merged, "azure_tenant_id")
-                    .or_else(|| keys::fallback_value("azure_tenant_id", lookup)),
-                client_secret: present(merged, "azure_client_secret")
-                    .or_else(|| keys::fallback_value("azure_client_secret", lookup))
+                client_id: text_or_fallback(merged, "azure_client_id", lookup),
+                tenant_id: text_or_fallback(merged, "azure_tenant_id", lookup),
+                client_secret: text_or_fallback(merged, "azure_client_secret", lookup)
                     .map(SecretValue::new),
                 username: environment
                     .get("REDIS_USERNAME")
@@ -95,9 +91,8 @@ fn aws_iam(merged: &Kwargs, lookup: &dyn Lookup, uses_tls: bool) -> Result<AwsIa
     }
     let user_name = present(merged, "aws_iam_user_name");
     let cache_name = present(merged, "aws_iam_cache_name");
-    let region = present(merged, "aws_iam_region").or_else(|| {
-        keys::fallback_value("aws_iam_region", lookup).filter(|region| !region.is_empty())
-    });
+    let region =
+        text_or_fallback(merged, "aws_iam_region", lookup).filter(|region| !region.is_empty());
     match (user_name, cache_name, region) {
         (Some(user_name), Some(cache_name), Some(region)) => Ok(AwsIamAuth {
             user_name,
