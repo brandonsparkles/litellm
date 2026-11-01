@@ -90,7 +90,7 @@ fn failure_label(outcome: Outcome) -> Option<&'static str> {
     }
 }
 
-fn state_label(state: &State) -> &'static str {
+pub(crate) fn state_label(state: &State) -> &'static str {
     match state {
         State::Closed { .. } => "closed",
         State::Open { .. } => "open",

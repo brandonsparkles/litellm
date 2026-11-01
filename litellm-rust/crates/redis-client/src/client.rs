@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use litellm_circuit_breaker::{Admission, Breaker, Failure};
+use litellm_circuit_breaker::{Admission, Breaker, Failure, State};
 use redis::{Cmd, FromRedisValue, RedisError, ToRedisArgs, ToSingleRedisArg, Value};
 
 use crate::{
@@ -37,6 +37,11 @@ impl RedisClient {
             breaker: config.breaker,
             events: config.events,
         })
+    }
+
+    /// The breaker's current state, or none when the breaker is disabled.
+    pub fn breaker_state(&self) -> Option<State> {
+        self.breaker.as_ref().map(Breaker::state)
     }
 
     pub async fn ping(&self) -> Result<(), Error> {

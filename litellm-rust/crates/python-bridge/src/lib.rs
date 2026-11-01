@@ -37,6 +37,8 @@ mod _native {
     #[pymodule_export]
     use crate::model_registry::bundled_model_cost_map;
     #[pymodule_export]
+    use crate::redis::native_redis_breaker_states;
+    #[pymodule_export]
     use crate::redis::router_cooldowns::NativeRouterCooldowns;
     #[pymodule_export]
     use crate::redis::router_usage::NativeRouterUsage;

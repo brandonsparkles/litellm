@@ -1,4 +1,7 @@
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, LazyLock, Mutex, PoisonError},
+};
 
 use litellm_config::{RedisSettings, ResolvedRedis, SecretSnapshot};
 use litellm_core_utils::settings::ProcessEnvironment;
@@ -9,7 +12,7 @@ use pyo3::{
     types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple},
 };
 
-use super::events::ServiceLoggingEvents;
+use super::events::{ServiceLoggingEvents, state_label};
 
 /// The `redis_kwargs` dict `RedisCache` hands redis-py, read the way `litellm/_redis.py` reads it.
 /// A value that is not plain data, such as a `credential_provider` object, reaches the resolver by
@@ -63,7 +66,10 @@ pub(crate) fn shared_client(
     namespace: Option<String>,
 ) -> PyResult<Option<RedisClient>> {
     let environment: SharedEnvironment = Arc::new(ProcessEnvironment);
-    let secrets = SecretSnapshot::read(kwargs.0.secret_names(), &*environment);
+    let secrets = match secret_snapshot(py, kwargs.0.secret_names())? {
+        Ok(secrets) => secrets,
+        Err(error) => return Ok(memory_only(py, &error)),
+    };
     let logger = crate::logger::capture(py);
     let resolved = match logger.scope(|| kwargs.0.resolve(&secrets, &*environment)) {
         Ok(resolved) => ResolvedRedis {
@@ -99,6 +105,33 @@ pub(crate) fn shared_client(
         client: client.clone(),
     });
     Ok(Some(client))
+}
+
+/// The breaker state of every native Redis client this process built, so the Prometheus state
+/// gauge counts them next to the Python `RedisCache` breakers.
+#[pyfunction]
+pub(crate) fn native_redis_breaker_states() -> Vec<&'static str> {
+    let clients = CLIENTS.lock().unwrap_or_else(PoisonError::into_inner);
+    clients
+        .iter()
+        .filter_map(|shared| shared.client.breaker_state())
+        .map(|state| state_label(&state))
+        .collect()
+}
+
+/// Every name the resolver may read, fetched once the way Python's `get_secret` fetches it: the
+/// configured secret manager first, then the process environment.
+fn secret_snapshot(
+    py: Python<'_>,
+    names: BTreeSet<String>,
+) -> PyResult<Result<SecretSnapshot, litellm_secrets::Error>> {
+    let source = crate::secrets::source(py)?;
+    let owned: Vec<String> = names.iter().cloned().collect();
+    let lookup = crate::execution::run_sync_value(py, async move {
+        let borrowed: Vec<&str> = owned.iter().map(String::as_str).collect();
+        Ok(source.resolve(&borrowed).await)
+    })?;
+    Ok(lookup.map(|lookup| SecretSnapshot::read(names, &*lookup)))
 }
 
 fn memory_only(py: Python<'_>, error: &(dyn std::error::Error + 'static)) -> Option<RedisClient> {

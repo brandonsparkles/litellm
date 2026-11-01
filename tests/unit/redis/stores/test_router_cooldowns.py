@@ -4,7 +4,7 @@ import json
 import logging
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Final
 
@@ -12,10 +12,15 @@ import pytest
 from pydantic import TypeAdapter
 from typing_extensions import ReadOnly, TypedDict
 
+import litellm
 from litellm._internal_context import current_service_target
-from litellm.caching.redis_cache import RedisCache
+from litellm.caching.redis_cache import RedisCache, redis_breaker_state_counts
+from litellm.integrations.custom_secret_manager import CustomSecretManager
 from litellm.redis.stores._connection import redis_kwargs
 from litellm.redis.stores.router_cooldowns import CooldownCacheValue, RouterCooldownStore
+from litellm.rust_bridge._native import NativeRouterCooldowns
+from litellm.rust_bridge.host import settings
+from litellm.types.secret_managers.main import KeyManagementSettings, KeyManagementSystem
 
 _WIRE: Final = Path(__file__).parents[4] / "litellm-rust/crates/redis-store/tests/fixtures/router_wire.json"
 
@@ -158,3 +163,46 @@ def test_a_redis_setting_the_native_client_cannot_honor_never_fails_construction
 
     assert store.active_sync(["model"], None) == (("model", cooldown),)
     assert next(iter(setting)) in caplog.text
+
+
+class _RecordingSecrets(CustomSecretManager):
+    def __init__(self, values: Mapping[str, str]) -> None:
+        super().__init__(secret_manager_name="router_cooldowns_test")  # pyright: ignore[reportUnknownMemberType]  # CustomSecretManager takes untyped **kwargs
+        self.values: Final = values
+        self.asked: tuple[str, ...] = ()
+
+    async def async_read_secret(
+        self, secret_name: str, optional_params: dict[str, object] | None = None, timeout: object = None
+    ) -> str | None:
+        raise AssertionError("get_secret reads custom managers synchronously")
+
+    def sync_read_secret(
+        self, secret_name: str, optional_params: dict[str, object] | None = None, timeout: object = None
+    ) -> str | None:
+        self.asked = (*self.asked, secret_name)
+        return self.values.get(secret_name)
+
+
+def test_the_native_store_reads_redis_secrets_through_the_secret_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("REDIS_PASSWORD", raising=False)
+    manager: Final = _RecordingSecrets({"REDIS_PASSWORD": "vault-password"})
+    monkeypatch.setattr(litellm, "secret_manager_client", manager)
+    monkeypatch.setattr(litellm, "_key_management_system", KeyManagementSystem.CUSTOM)
+    monkeypatch.setattr(litellm, "_key_management_settings", KeyManagementSettings(access_mode="read_only"))
+    configured: Final = settings.secret_manager
+    monkeypatch.setattr(settings, "secret_manager", lambda: replace(configured(), native=False))
+
+    NativeRouterCooldowns({"host": "127.0.0.1", "port": 1}, namespace="secret-manager-test")
+
+    assert "REDIS_PASSWORD" in manager.asked
+
+
+def test_the_native_breaker_counts_in_the_redis_breaker_state_gauge(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REDIS_CIRCUIT_BREAKER_ENABLED", "true")
+    monkeypatch.setenv("REDIS_CIRCUIT_BREAKER_FAILURE_THRESHOLD", "1")
+    open_before: Final = redis_breaker_state_counts().get("open", 0)
+    store: Final = NativeRouterCooldowns({"host": "127.0.0.1", "port": 1}, namespace="breaker-gauge-test")
+
+    store.put("model", _entry("model"), 60.0)
+
+    assert redis_breaker_state_counts().get("open", 0) == open_before + 1
