@@ -61,10 +61,9 @@ fn credentials(auth: RedisAuth, host: &HostServices) -> Result<Credentials, Erro
             auth,
             host.environment.clone(),
         ))),
-        RedisAuth::AwsIam(auth) => refreshing(RefreshingCredentials::new(ElastiCacheIam::new(
-            auth,
-            host.environment.clone(),
-        ))),
+        RedisAuth::AwsIam(auth) => {
+            refreshing(RefreshingCredentials::new(ElastiCacheIam::new(auth)))
+        }
         RedisAuth::GcpIam { service_account } => refreshing(RefreshingCredentials::new(
             GcpIam::new(host.http.clone(), service_account, host.environment.clone()),
         )),

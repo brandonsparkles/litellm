@@ -1,34 +1,27 @@
 use std::time::{Duration, SystemTime};
 
-use litellm_auth_aws::{AwsAuthConfig, AwsAuthService, SigningScope, presign_url};
+use litellm_auth_aws::{AwsAuthService, SigningScope, presign_url};
 use litellm_config::AwsIamAuth;
 
 use crate::Error;
 use crate::error::CredentialStage;
 use litellm_secret_value::SecretValue;
 
-use crate::{CredentialSource, Expiring, SharedEnvironment, SourceFuture};
+use crate::{CredentialSource, Expiring, SourceFuture};
 
 const SERVICE: &str = "elasticache";
 const TOKEN_LIFETIME: Duration = Duration::from_secs(900);
-const SDK_ENVIRONMENT: &[&str] = &[
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN",
-];
 
 pub(crate) struct ElastiCacheIam {
     service: AwsAuthService,
     auth: AwsIamAuth,
-    lookup: SharedEnvironment,
 }
 
 impl ElastiCacheIam {
-    pub(crate) fn new(auth: AwsIamAuth, lookup: SharedEnvironment) -> Self {
+    pub(crate) fn new(auth: AwsIamAuth) -> Self {
         Self {
             service: AwsAuthService::default(),
             auth,
-            lookup: super::sdk_environment(lookup, SDK_ENVIRONMENT),
         }
     }
 }
@@ -54,16 +47,9 @@ pub(crate) fn connect_url(auth: &AwsIamAuth) -> String {
 impl CredentialSource for ElastiCacheIam {
     fn fetch(&self) -> SourceFuture<'_> {
         Box::pin(async move {
-            let lookup = |name: &str| self.lookup.get(name);
             let credentials = self
                 .service
-                .resolve_credentials(
-                    AwsAuthConfig {
-                        region_name: Some(self.auth.region.clone()),
-                        ..Default::default()
-                    },
-                    &lookup,
-                )
+                .default_chain_credentials(&self.auth.region)
                 .await
                 .map_err(Error::credential(CredentialStage::Identity))?;
             let now = SystemTime::now();
@@ -97,8 +83,7 @@ mod tests {
     use litellm_config::AwsIamAuth;
     use rstest::rstest;
 
-    use super::{ElastiCacheIam, connect_url};
-    use crate::CredentialSource;
+    use super::connect_url;
 
     #[rstest]
     #[case::provisioned(false, "https://cache-1/?Action=connect&User=iam+user%2F1")]
@@ -115,39 +100,5 @@ mod tests {
         };
 
         assert_eq!(connect_url(&auth), expected);
-    }
-
-    #[rstest]
-    #[tokio::test]
-    async fn litellm_provider_settings_do_not_change_the_redis_identity() {
-        let environment = |name: &str| {
-            match name {
-                "AWS_ACCESS_KEY_ID" => Some("AKIDREDIS"),
-                "AWS_SECRET_ACCESS_KEY" => Some("redis-secret"),
-                "AWS_ROLE_NAME" => Some("arn:aws:iam::123456789012:role/bedrock"),
-                "AWS_PROFILE_NAME" => Some("bedrock"),
-                "AWS_STS_ENDPOINT" => Some("http://127.0.0.1:1"),
-                _ => None,
-            }
-            .map(str::to_owned)
-        };
-        let source = ElastiCacheIam::new(
-            AwsIamAuth {
-                user_name: "redis-user".to_owned(),
-                cache_name: "cache-1".to_owned(),
-                region: "us-east-1".to_owned(),
-                serverless: false,
-            },
-            std::sync::Arc::new(environment),
-        );
-
-        let token = source.fetch().await.unwrap();
-
-        assert!(
-            token
-                .password
-                .expose()
-                .contains("X-Amz-Credential=AKIDREDIS%2F")
-        );
     }
 }

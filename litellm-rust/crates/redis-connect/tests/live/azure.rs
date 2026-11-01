@@ -1,15 +1,10 @@
-use rstest::{fixture, rstest};
+use rstest::rstest;
 
-use super::{LiveConfig, config, roundtrip};
-
-#[fixture]
-fn azure_config() -> Option<LiveConfig> {
-    config("LITELLM_REDIS_AZURE_LIVE_CONFIG")
-}
+use super::{config, roundtrip};
 
 #[rstest]
+#[ignore = "needs a live cloud Redis; set LITELLM_REDIS_AZURE_LIVE_CONFIG and run with --ignored"]
 #[tokio::test]
-async fn credentials_authenticate_existing_and_fresh_connections(azure_config: Option<LiveConfig>) {
-    let Some(config) = azure_config else { return };
-    roundtrip(config).await;
+async fn credentials_authenticate_existing_and_fresh_connections() {
+    roundtrip(config("LITELLM_REDIS_AZURE_LIVE_CONFIG")).await;
 }

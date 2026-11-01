@@ -18,12 +18,12 @@ struct LiveConfig {
     hold_seconds: u64,
 }
 
-fn config(variable: &str) -> Option<LiveConfig> {
-    let path = PathBuf::from(std::env::var_os(variable)?);
-    Some(
-        serde_json::from_slice(&std::fs::read(path).expect("read live Redis config"))
-            .expect("parse live Redis config"),
-    )
+fn config(variable: &str) -> LiveConfig {
+    let path = PathBuf::from(
+        std::env::var_os(variable).unwrap_or_else(|| panic!("{variable} must name a live config")),
+    );
+    serde_json::from_slice(&std::fs::read(path).expect("read live Redis config"))
+        .expect("parse live Redis config")
 }
 
 async fn roundtrip(config: LiveConfig) {

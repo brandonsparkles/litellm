@@ -36,10 +36,22 @@ pub trait CredentialSource: Send + Sync + 'static {
 enum Latest {
     Pending,
     Ready {
-        credentials: BasicAuth,
-        expires_at: Option<Instant>,
+        username: String,
+        password: SecretValue,
     },
     Unavailable(Arc<Error>),
+}
+
+impl Latest {
+    fn is_same_token(&self, other: &Self) -> bool {
+        matches!(
+            (self, other),
+            (
+                Self::Ready { username, password },
+                Self::Ready { username: other_username, password: other_password },
+            ) if username == other_username && password == other_password
+        )
+    }
 }
 
 type Start = Box<dyn FnOnce() + Send>;
@@ -77,39 +89,25 @@ impl StreamingCredentialsProvider for RefreshingCredentials {
         &self,
     ) -> Pin<Box<dyn Stream<Item = Result<BasicAuth, RedisError>> + Send + 'static>> {
         self.start_once();
-        let receiver = self.latest.clone();
         Box::pin(stream::unfold(
-            (receiver, true),
+            (self.latest.clone(), true),
             |(mut receiver, first)| async move {
-                loop {
-                    let changed = match first {
-                        true => Ok(()),
-                        false => receiver.changed().await,
-                    };
-                    changed.ok()?;
-                    let latest = receiver.borrow_and_update().clone();
-                    match latest {
-                        Latest::Pending => {
-                            receiver.changed().await.ok()?;
-                            receiver.mark_changed();
-                        }
-                        Latest::Ready {
-                            credentials,
-                            expires_at,
-                        } => {
-                            let result = match expires_at {
-                                Some(deadline) if deadline <= Instant::now() => {
-                                    Err(public_error(&Error::ExpiredCredential))
-                                }
-                                _ => Ok(credentials),
-                            };
-                            return Some((result, (receiver, false)));
-                        }
-                        Latest::Unavailable(error) => {
-                            return Some((Err(public_error(&error)), (receiver, false)));
-                        }
-                    }
+                if !first {
+                    receiver.changed().await.ok()?;
                 }
+                let latest = receiver
+                    .wait_for(|latest| !matches!(latest, Latest::Pending))
+                    .await
+                    .ok()?
+                    .clone();
+                let item = match latest {
+                    Latest::Ready { username, password } => {
+                        Ok(BasicAuth::new(username, password.expose().to_owned()))
+                    }
+                    Latest::Unavailable(error) => Err(public_error(&error)),
+                    Latest::Pending => unreachable!("wait_for skips Pending"),
+                };
+                Some((item, (receiver, false)))
             },
         ))
     }
@@ -123,24 +121,50 @@ fn public_error(error: &Error) -> RedisError {
     ))
 }
 
-async fn while_valid<T>(
+struct Fresh {
+    latest: Latest,
+    expires_at: Option<Instant>,
+    refresh_in: Duration,
+}
+
+fn fresh(credentials: Expiring, now: SystemTime) -> Result<Fresh, Error> {
+    let remaining = credentials
+        .expires_at
+        .map(|expires_at| expires_at.duration_since(now).unwrap_or_default());
+    if remaining == Some(Duration::ZERO) {
+        return Err(Error::ExpiredCredential);
+    }
+    Ok(Fresh {
+        latest: Latest::Ready {
+            username: credentials
+                .username
+                .unwrap_or_else(|| TOKEN_ONLY_USERNAME.to_owned()),
+            password: credentials.password,
+        },
+        expires_at: remaining.map(|remaining| Instant::now() + remaining),
+        refresh_in: refresh_after(credentials.expires_at, now),
+    })
+}
+
+async fn until_expiry<T>(
     future: impl Future<Output = T>,
     sender: &watch::Sender<Latest>,
-    expires_at: &mut Option<Instant>,
+    expires_at: Option<Instant>,
 ) -> Option<T> {
-    tokio::pin!(future);
+    let expiration = async {
+        match expires_at {
+            Some(deadline) => tokio::time::sleep_until(deadline).await,
+            None => pending().await,
+        }
+    };
+    tokio::pin!(future, expiration);
+    let mut expired = false;
     loop {
-        let expiration = async {
-            match *expires_at {
-                Some(deadline) => tokio::time::sleep_until(deadline).await,
-                None => pending().await,
-            }
-        };
         tokio::select! {
             biased;
             () = sender.closed() => return None,
-            () = expiration => {
-                *expires_at = None;
+            () = &mut expiration, if !expired => {
+                expired = true;
                 sender.send_replace(Latest::Unavailable(Arc::new(Error::ExpiredCredential)));
             }
             result = &mut future => return Some(result),
@@ -159,37 +183,27 @@ async fn refresh(source: impl CredentialSource, sender: watch::Sender<Latest>) {
                     timeout: ACQUISITION_TIMEOUT,
                     cause,
                 })?
-                .and_then(|credentials| {
-                    if credentials
-                        .expires_at
-                        .is_some_and(|expiry| expiry <= SystemTime::now())
-                    {
-                        return Err(Error::ExpiredCredential);
-                    }
-                    Ok(credentials)
-                })
+                .and_then(|credentials| fresh(credentials, SystemTime::now()))
         };
-        let Some(result) = while_valid(acquisition, &sender, &mut expires_at).await else {
+        let Some(result) = until_expiry(acquisition, &sender, expires_at).await else {
             return;
         };
         let wait = match result {
-            Ok(credentials) => {
+            Ok(Fresh {
+                latest,
+                expires_at: deadline,
+                refresh_in,
+            }) => {
                 retry = FIRST_RETRY;
-                let now = SystemTime::now();
-                let wait = refresh_after(credentials.expires_at, now);
-                expires_at = credentials
-                    .expires_at
-                    .map(|expiry| Instant::now() + expiry.duration_since(now).unwrap_or_default());
-                sender.send_replace(Latest::Ready {
-                    credentials: BasicAuth::new(
-                        credentials
-                            .username
-                            .unwrap_or_else(|| TOKEN_ONLY_USERNAME.to_owned()),
-                        credentials.password.expose().to_owned(),
-                    ),
-                    expires_at,
+                expires_at = deadline;
+                sender.send_if_modified(|current| {
+                    let changed = !current.is_same_token(&latest);
+                    if changed {
+                        *current = latest;
+                    }
+                    changed
                 });
-                wait
+                refresh_in
             }
             Err(error) => {
                 tracing::warn!(failure = error.kind(), upstream_status = error.upstream_status(), retry_in = ?retry, "fetching Redis credentials failed");
@@ -201,7 +215,7 @@ async fn refresh(source: impl CredentialSource, sender: watch::Sender<Latest>) {
                 wait
             }
         };
-        if while_valid(tokio::time::sleep(wait), &sender, &mut expires_at)
+        if until_expiry(tokio::time::sleep(wait), &sender, expires_at)
             .await
             .is_none()
         {
@@ -372,6 +386,26 @@ mod tests {
                 std::future::pending().await
             })
         }
+    }
+
+    #[rstest]
+    #[tokio::test(start_paused = true)]
+    async fn a_refresh_that_returns_the_same_token_is_not_pushed_again() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = RefreshingCredentials::new(Scripted {
+            replies: Mutex::new(vec![
+                token("same", Duration::from_secs(8)),
+                token("same", Duration::from_secs(3600)),
+            ]),
+            calls: calls.clone(),
+        });
+        let mut stream = provider.subscribe();
+        assert_eq!(stream.next().await.unwrap().unwrap().password(), "same");
+
+        let pushed = tokio::time::timeout(Duration::from_secs(60), stream.next()).await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(pushed.is_err(), "an unchanged token was pushed again");
     }
 
     #[rstest]

@@ -11,7 +11,6 @@ use crate::{CredentialSource, Expiring, SharedEnvironment, SourceFuture};
 
 const IAM_CREDENTIALS: &str = "https://iamcredentials.googleapis.com/v1";
 const CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
-const SDK_ENVIRONMENT: &[&str] = &["GOOGLE_APPLICATION_CREDENTIALS"];
 
 pub(crate) struct GcpIam {
     http: litellm_http::Client,
@@ -37,7 +36,7 @@ impl GcpIam {
             http,
             identity: GcpAuth::default(),
             service_account,
-            lookup: super::sdk_environment(lookup, SDK_ENVIRONMENT),
+            lookup,
         }
     }
 }
