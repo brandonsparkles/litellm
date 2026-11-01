@@ -11,6 +11,7 @@ use crate::{CredentialSource, Expiring, SharedEnvironment, SourceFuture};
 
 const IAM_CREDENTIALS: &str = "https://iamcredentials.googleapis.com/v1";
 const CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
+const SDK_ENVIRONMENT: &[&str] = &["GOOGLE_APPLICATION_CREDENTIALS"];
 
 pub(crate) struct GcpIam {
     http: litellm_http::Client,
@@ -36,7 +37,7 @@ impl GcpIam {
             http,
             identity: GcpAuth::default(),
             service_account,
-            lookup,
+            lookup: super::sdk_environment(lookup, SDK_ENVIRONMENT),
         }
     }
 }
@@ -85,5 +86,42 @@ impl CredentialSource for GcpIam {
                 expires_at: Some(expires_at),
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::GcpIam;
+    use crate::CredentialSource;
+
+    #[rstest]
+    #[tokio::test]
+    async fn the_caller_identity_comes_from_application_default_credentials_not_vertex_settings() {
+        let environment = |name: &str| {
+            match name {
+                "VERTEXAI_CREDENTIALS" => {
+                    Some(r#"{"type":"service_account","project_id":"vertex"}"#)
+                }
+                "GOOGLE_APPLICATION_CREDENTIALS" => Some("/nonexistent/redis-adc.json"),
+                _ => None,
+            }
+            .map(str::to_owned)
+        };
+        let source = GcpIam::new(
+            litellm_http::Client::for_test(),
+            "projects/-/serviceAccounts/redis@project.iam.gserviceaccount.com".to_owned(),
+            std::sync::Arc::new(environment),
+        );
+
+        let Err(error) = source.fetch().await else {
+            panic!("a missing credentials file must fail");
+        };
+
+        assert_eq!(
+            litellm_error::find::<std::io::Error>(&error).map(std::io::Error::kind),
+            Some(std::io::ErrorKind::NotFound)
+        );
     }
 }

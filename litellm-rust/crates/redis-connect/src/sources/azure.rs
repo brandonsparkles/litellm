@@ -5,18 +5,20 @@ use litellm_config::AzureAdAuth;
 use crate::Error;
 use crate::error::CredentialStage;
 
-use crate::{CredentialSource, Expiring, SourceFuture};
+use crate::{CredentialSource, Expiring, SharedEnvironment, SourceFuture};
 
 const AZURE_REDIS_SCOPE: &str = "https://redis.azure.com/.default";
+const SDK_ENVIRONMENT: &[&str] = &["AZURE_AUTHORITY_HOST", "IDENTITY_ENDPOINT", "MSI_ENDPOINT"];
 
 pub(crate) struct AzureAd {
     service: AzureAuthService,
     inputs: AzureAuthInputs,
     username: Option<String>,
+    lookup: SharedEnvironment,
 }
 
 impl AzureAd {
-    pub(crate) fn new(auth: AzureAdAuth) -> Self {
+    pub(crate) fn new(auth: AzureAdAuth, lookup: SharedEnvironment) -> Self {
         let configured = |value: Option<String>| match value {
             Some(value) => ConfigValue::Value(Sourced::new(value, InputSource::Deployment)),
             None => ConfigValue::Absent,
@@ -40,6 +42,7 @@ impl AzureAd {
             service: AzureAuthService::default(),
             inputs,
             username: auth.username,
+            lookup: super::sdk_environment(lookup, SDK_ENVIRONMENT),
         }
     }
 }
@@ -49,7 +52,7 @@ impl CredentialSource for AzureAd {
         Box::pin(async move {
             let credential = self
                 .service
-                .get_azure_ad_token(&self.inputs, &|_| None)
+                .get_azure_ad_token(&self.inputs, &|name| self.lookup.get(name))
                 .await
                 .map_err(Error::credential(CredentialStage::Identity))?
                 .ok_or(Error::MissingCredential { provider: "Azure" })?

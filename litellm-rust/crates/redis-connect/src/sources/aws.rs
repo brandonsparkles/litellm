@@ -11,6 +11,11 @@ use crate::{CredentialSource, Expiring, SharedEnvironment, SourceFuture};
 
 const SERVICE: &str = "elasticache";
 const TOKEN_LIFETIME: Duration = Duration::from_secs(900);
+const SDK_ENVIRONMENT: &[&str] = &[
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+];
 
 pub(crate) struct ElastiCacheIam {
     service: AwsAuthService,
@@ -23,7 +28,7 @@ impl ElastiCacheIam {
         Self {
             service: AwsAuthService::default(),
             auth,
-            lookup,
+            lookup: super::sdk_environment(lookup, SDK_ENVIRONMENT),
         }
     }
 }
@@ -92,7 +97,8 @@ mod tests {
     use litellm_config::AwsIamAuth;
     use rstest::rstest;
 
-    use super::connect_url;
+    use super::{ElastiCacheIam, connect_url};
+    use crate::CredentialSource;
 
     #[rstest]
     #[case::provisioned(false, "https://cache-1/?Action=connect&User=iam+user%2F1")]
@@ -109,5 +115,39 @@ mod tests {
         };
 
         assert_eq!(connect_url(&auth), expected);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn litellm_provider_settings_do_not_change_the_redis_identity() {
+        let environment = |name: &str| {
+            match name {
+                "AWS_ACCESS_KEY_ID" => Some("AKIDREDIS"),
+                "AWS_SECRET_ACCESS_KEY" => Some("redis-secret"),
+                "AWS_ROLE_NAME" => Some("arn:aws:iam::123456789012:role/bedrock"),
+                "AWS_PROFILE_NAME" => Some("bedrock"),
+                "AWS_STS_ENDPOINT" => Some("http://127.0.0.1:1"),
+                _ => None,
+            }
+            .map(str::to_owned)
+        };
+        let source = ElastiCacheIam::new(
+            AwsIamAuth {
+                user_name: "redis-user".to_owned(),
+                cache_name: "cache-1".to_owned(),
+                region: "us-east-1".to_owned(),
+                serverless: false,
+            },
+            std::sync::Arc::new(environment),
+        );
+
+        let token = source.fetch().await.unwrap();
+
+        assert!(
+            token
+                .password
+                .expose()
+                .contains("X-Amz-Credential=AKIDREDIS%2F")
+        );
     }
 }

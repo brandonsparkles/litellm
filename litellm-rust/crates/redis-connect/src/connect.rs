@@ -57,7 +57,10 @@ fn credentials(auth: RedisAuth, host: &HostServices) -> Result<Credentials, Erro
     Ok(match auth {
         RedisAuth::Static { username, password } => Credentials::Static { username, password },
         RedisAuth::Host => return Err(Error::NoHostCredentialProvider),
-        RedisAuth::AzureAd(auth) => refreshing(RefreshingCredentials::new(AzureAd::new(auth))),
+        RedisAuth::AzureAd(auth) => refreshing(RefreshingCredentials::new(AzureAd::new(
+            auth,
+            host.environment.clone(),
+        ))),
         RedisAuth::AwsIam(auth) => refreshing(RefreshingCredentials::new(ElastiCacheIam::new(
             auth,
             host.environment.clone(),
