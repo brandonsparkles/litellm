@@ -924,7 +924,7 @@ class RustCore(
         self._hosted.set_routing_groups(resolved.routing_groups)
         track_live_registry(self._hosted)
         self._hosted.routable_lookup = self._routable
-        self._handle: RouterCoreHandle = self._new_handle(list(self._hosted._core_model_list))  # pyright: ignore[reportPrivateUsage]  # the core reads its own host registry
+        self._handle: RouterCoreHandle = self._new_handle(self._hosted.served_deployments())
         self._join_callback_holders()
         self._checks: Final = OptionalChecks(self, host, self._cache, self._hosted, ctx, config.arguments)
         self._hosted.checks = self._checks
@@ -1038,7 +1038,7 @@ class RustCore(
     def _rebuild(self) -> None:
         """A new Rust core for changed static settings, over the same deployments."""
         old: Final = self._handle
-        self._handle = self._new_handle(list(self._hosted._core_model_list))  # pyright: ignore[reportPrivateUsage]  # see __init__
+        self._handle = self._new_handle(self._hosted.served_deployments())
         old.retire()
 
     def _sync_registry(self) -> None:
@@ -1048,7 +1048,7 @@ class RustCore(
         self._tag_filtering_models = None
         handle: Final[object] = self.__dict__.get("_handle")
         if isinstance(handle, RouterCoreHandle):
-            _ = handle.apply({"replace": _plain(list(self._hosted._core_model_list))})  # pyright: ignore[reportPrivateUsage]  # see __init__
+            _ = handle.apply({"replace": _plain(self._hosted.served_deployments())})
 
     # -- entry points ----------------------------------------------------------------------------
 
