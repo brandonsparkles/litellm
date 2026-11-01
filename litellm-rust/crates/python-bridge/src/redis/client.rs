@@ -5,7 +5,6 @@ use litellm_core_utils::settings::ProcessEnvironment;
 use litellm_redis_client::{RedisClient, RedisEvents};
 use litellm_redis_connect::{HostServices, SharedEnvironment};
 use pyo3::{
-    exceptions::PyValueError,
     prelude::*,
     types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple},
 };
@@ -55,28 +54,33 @@ struct Shared {
 static CLIENTS: LazyLock<Mutex<Vec<Shared>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 /// The one client for a resolved Redis config, so every family in this process shares its pool
-/// and its breaker. A config the resolver rejects fails here, at boot, rather than leaving the
-/// family on memory alone.
+/// and its breaker. Like redis-py, which never connects at construction, a config the resolver or
+/// the connector cannot honor leaves the family on memory with a warning rather than failing the
+/// `Router`.
 pub(crate) fn shared_client(
     py: Python<'_>,
     kwargs: PythonRedisSettings,
     namespace: Option<String>,
-) -> PyResult<RedisClient> {
+) -> PyResult<Option<RedisClient>> {
     let environment: SharedEnvironment = Arc::new(ProcessEnvironment);
     let secrets = SecretSnapshot::read(kwargs.0.secret_names(), &*environment);
-    let resolved = ResolvedRedis {
-        namespace,
-        ..kwargs.0.resolve(&secrets, &*environment).map_err(|error| {
-            PyValueError::new_err(litellm_error::Report::new(&error).to_string())
-        })?
+    let logger = crate::logger::capture(py);
+    let resolved = match logger.scope(|| kwargs.0.resolve(&secrets, &*environment)) {
+        Ok(resolved) => ResolvedRedis {
+            namespace,
+            ..resolved
+        },
+        Err(error) => return Ok(memory_only(py, &error)),
     };
     let mut clients = CLIENTS.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(shared) = clients.iter().find(|shared| shared.resolved == resolved) {
-        return Ok(shared.client.clone());
+        return Ok(Some(shared.client.clone()));
     }
     let events: Arc<dyn RedisEvents> = Arc::new(ServiceLoggingEvents::new(py)?);
-    let breaker = litellm_redis_connect::breaker_config(&*environment)
-        .map_err(|error| PyValueError::new_err(litellm_error::Report::new(&error).to_string()))?;
+    let breaker = match logger.scope(|| litellm_redis_connect::breaker_config(&*environment)) {
+        Ok(breaker) => breaker,
+        Err(error) => return Ok(memory_only(py, &error)),
+    };
     let host = HostServices {
         events: Some(events),
         breaker,
@@ -84,13 +88,25 @@ pub(crate) fn shared_client(
         environment,
     };
     let target = resolved.clone();
-    let client = crate::execution::run_sync_value(py, async move {
-        litellm_redis_connect::connect(target, host)
-            .map_err(|error| PyValueError::new_err(litellm_error::Report::new(&error).to_string()))
-    })?;
+    let client = match crate::execution::run_sync_value(py, async move {
+        Ok(litellm_redis_connect::connect(target, host))
+    })? {
+        Ok(client) => client,
+        Err(error) => return Ok(memory_only(py, &error)),
+    };
     clients.push(Shared {
         resolved,
         client: client.clone(),
     });
-    Ok(client)
+    Ok(Some(client))
+}
+
+fn memory_only(py: Python<'_>, error: &(dyn std::error::Error + 'static)) -> Option<RedisClient> {
+    let report = litellm_error::Report::new(error).to_string();
+    crate::logger::capture(py).scope(|| {
+        litellm_tracing::warn!(
+            "Redis is not usable from the Rust router stores, cooldowns and usage stay in memory: {report}"
+        )
+    });
+    None
 }

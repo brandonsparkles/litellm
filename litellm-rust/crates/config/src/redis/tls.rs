@@ -4,7 +4,7 @@ use super::{Entry, Expected, Kwargs, RedisError, bool_value, parsed, text_value}
 use crate::Value;
 
 // redis-py's parse_url turns every query parameter into a client kwarg. Only the TLS ones have a redis-rs
-// equivalent, so any other parameter, and any parameter on a plain redis:// url, is rejected
+// equivalent, so any other parameter, and any parameter on a plain redis:// url, is warned and dropped
 const URL_TLS_SETTINGS: &[&str] = &[
     "ssl_cert_reqs",
     "ssl_ca_certs",
@@ -57,14 +57,16 @@ pub(super) fn url_tls(url: &str) -> Result<TlsOptions, RedisError> {
             )
         })
         .collect();
-    if let Some((_, entry)) = query
-        .iter()
-        .find(|(name, _)| !tls_scheme || !URL_TLS_SETTINGS.contains(&name.as_str()))
-    {
-        return Err(RedisError::Unsupported {
-            setting: entry.source.clone(),
-        });
+    let (honored, ignored): (Kwargs, Kwargs) = query
+        .into_iter()
+        .partition(|(name, _)| tls_scheme && URL_TLS_SETTINGS.contains(&name.as_str()));
+    for entry in ignored.values() {
+        tracing::warn!(
+            "Redis setting {} is not supported by the Rust client and is ignored",
+            entry.source
+        );
     }
+    let query = honored;
     Ok(TlsOptions {
         check_hostname: text_value(&query, "ssl_check_hostname")
             .is_some_and(|text| url_bool(&text)),

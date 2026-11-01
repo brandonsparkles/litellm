@@ -1,6 +1,8 @@
 import ast
 import asyncio
 import json
+import logging
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -139,8 +141,20 @@ def test_the_wire_fixture_is_what_mains_codec_writes_and_reads() -> None:
         assert int(case["ttl_seconds"]) == case["redis_ttl_seconds"]
 
 
-@pytest.mark.parametrize("setting", ({"ssl_ciphers": "HIGH"}, {"credential_provider": object()}))
-def test_a_redis_setting_the_native_client_cannot_honor_fails_construction(setting: dict[str, object]) -> None:
+@pytest.mark.parametrize(
+    "setting",
+    ({"ssl_ciphers": "HIGH"}, {"unix_socket_path": "/tmp/redis.sock"}, {"credential_provider": object()}),
+)
+def test_a_redis_setting_the_native_client_cannot_honor_never_fails_construction(
+    setting: dict[str, object], caplog: pytest.LogCaptureFixture
+) -> None:
     redis: Final = RedisCache(host="127.0.0.1", port=1, **setting)
-    with pytest.raises(ValueError, match=next(iter(setting))):
-        RouterCooldownStore(redis)
+    with caplog.at_level(logging.WARNING):
+        store: Final = RouterCooldownStore(redis)
+    cooldown: Final = CooldownCacheValue(
+        exception_received="model", status_code="429", timestamp=time.time(), cooldown_time=120.0
+    )
+    store.put("model", cooldown, 60.0)
+
+    assert store.active_sync(["model"], None) == (("model", cooldown),)
+    assert next(iter(setting)) in caplog.text

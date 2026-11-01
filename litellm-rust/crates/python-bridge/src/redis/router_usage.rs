@@ -53,7 +53,8 @@ impl NativeRouterUsage {
     ) -> PyResult<Self> {
         let client = redis_kwargs
             .map(|kwargs| shared_client(py, kwargs, namespace))
-            .transpose()?;
+            .transpose()?
+            .flatten();
         let policy = router_tier_policies(py)?.usage;
         Ok(Self(Arc::new(RouterUsage::new(client, policy))))
     }

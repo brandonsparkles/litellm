@@ -174,7 +174,6 @@ impl RedisSettings {
             .filter(|(key, _)| !(key == "url" && drop_environment_url))
             .chain(block)
             .collect();
-        reject_unsupported(&merged)?;
         warn_ignored(&merged);
 
         let startup_nodes = match configured(&merged, "startup_nodes") {
@@ -378,15 +377,6 @@ pub fn environment_has_target(lookup: &dyn Lookup) -> bool {
     .any(|name| lookup.get(name).is_some())
 }
 
-fn reject_unsupported(merged: &Kwargs) -> Result<(), RedisError> {
-    match merged.iter().find(|(key, _)| is_unsupported(key)) {
-        Some((_, entry)) => Err(RedisError::Unsupported {
-            setting: entry.source.clone(),
-        }),
-        None => Ok(()),
-    }
-}
-
 fn invalid(setting: &str, expected: Expected) -> RedisError {
     RedisError::Invalid {
         setting: setting.to_owned(),
@@ -444,15 +434,15 @@ fn coerced<N: std::str::FromStr, T>(
 }
 
 fn warn_ignored(merged: &Kwargs) {
-    for key in merged.keys() {
+    for (key, entry) in merged {
         if keys::setting(key).is_some_and(|setting| setting.handling == Handling::Warn) {
-            tracing::warn!(setting = %key, "Redis setting is accepted but ignored");
+            tracing::warn!(
+                "Redis setting {} is not supported by the Rust client and is ignored: {}",
+                entry.source,
+                keys::consequence(key)
+            );
         }
     }
-}
-
-fn is_unsupported(key: &str) -> bool {
-    keys::setting(key).is_some_and(|setting| setting.handling == Handling::Reject)
 }
 
 fn environment_kwargs(lookup: &dyn Lookup) -> Kwargs {

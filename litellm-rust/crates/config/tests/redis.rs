@@ -185,14 +185,35 @@ fn resolves_redis_through_the_parsed_config(
     &[],
     "connection_pool"
 )]
-fn rejected_settings_name_their_source(
+#[case::unix_socket_path(
+    "general_settings:\n  coordination_redis:\n    host: redis\n    unix_socket_path: /tmp/redis.sock",
+    &[],
+    "unix_socket_path"
+)]
+fn unsupported_settings_resolve_with_a_warning_naming_their_source(
     #[case] yaml: &str,
     #[case] environment: &[(&str, &str)],
     #[case] expected: &str,
 ) {
-    let error = resolve(yaml, environment).unwrap_err();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(WarningCapture(events.clone()));
+    let resolved = tracing::subscriber::with_default(subscriber, || resolve(yaml, environment));
+    let warnings = events.lock().unwrap().join(" ");
 
-    assert!(matches!(error, RedisError::Unsupported { setting } if setting == expected));
+    assert_eq!(
+        resolved.unwrap().endpoint,
+        Endpoint::Host(litellm_redis_types::HostEndpoint {
+            host: "redis".into(),
+            port: 6379,
+            db: 0,
+            tls: None,
+        })
+    );
+    assert!(
+        warnings.contains(&format!("Redis setting {expected} is not supported")),
+        "{warnings}"
+    );
+    assert!(warnings.contains("is ignored: "), "{warnings}");
 }
 
 fn static_auth(username: Option<&str>, password: Option<&str>) -> RedisAuth {
@@ -571,19 +592,23 @@ fn a_missing_canonical_startup_nodes_reference_shadows_the_cache_alias() {
 }
 
 #[rstest]
-fn rejected_environment_settings_never_print_the_value() {
-    let error = resolve(
-        "model_list: []",
-        &[
-            ("REDIS_HOST", "redis"),
-            ("REDIS_SSL_CIPHERS", "private-option-value"),
-        ],
-    )
-    .unwrap_err();
-    let message = error.to_string();
+fn unsupported_environment_settings_never_print_the_value() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(WarningCapture(events.clone()));
+    tracing::subscriber::with_default(subscriber, || {
+        resolve(
+            "model_list: []",
+            &[
+                ("REDIS_HOST", "redis"),
+                ("REDIS_SSL_CIPHERS", "private-option-value"),
+            ],
+        )
+        .unwrap();
+    });
+    let warnings = events.lock().unwrap().join(" ");
 
-    assert!(message.contains("REDIS_SSL_CIPHERS"));
-    assert!(!message.contains("private-option-value"));
+    assert!(warnings.contains("REDIS_SSL_CIPHERS"), "{warnings}");
+    assert!(!warnings.contains("private-option-value"), "{warnings}");
 }
 
 #[rstest]
@@ -721,14 +746,10 @@ struct ContractCase {
 const CONTRACT: &str = include_str!("redis_resolution.json");
 
 // Settings redis-py accepts and Rust rejects at boot on purpose, each listed in crates/config/AGENTS.md
-const DIVERGENCES: &[(&str, &str)] = &[
-    ("ssl_ciphers", "ssl_ciphers"),
-    ("unix_socket_path", "unix_socket_path"),
-    (
-        "a_url_query_setting_without_a_redis_rs_equivalent",
-        "url ?socket_timeout",
-    ),
-];
+const DIVERGENCES: &[(&str, &str)] = &[];
+
+// Cases where Rust resolves a different target than Python after warning that it ignored the setting
+const WARNED_DIFFERENCES: &[&str] = &["unix_socket_path"];
 
 fn tls_view(tls: Option<&TlsOptions>) -> serde_json::Value {
     tls.map_or(serde_json::Value::Null, |tls| {
@@ -825,19 +846,17 @@ fn mismatch(case: &ContractCase) -> Option<String> {
     let divergence = DIVERGENCES.iter().find(|(name, _)| *name == case.name);
     let python_rejects = case.python == serde_json::json!({"rejected": true});
     match (rust_outcome(case), divergence) {
-        (
-            Err(RedisError::Unsupported { setting } | RedisError::Invalid { setting, .. }),
-            Some((_, expected)),
-        ) if setting == *expected && !python_rejects => None,
+        (Err(RedisError::Invalid { setting, .. }), Some((_, expected)))
+            if setting == *expected && !python_rejects =>
+        {
+            None
+        }
         (outcome, Some(_)) => Some(format!(
             "{}: listed as a divergence, got {outcome:?}",
             case.name
         )),
-        (Err(RedisError::Unsupported { setting }), None) => Some(format!(
-            "{}: Rust rejects {setting}, which Python accepts",
-            case.name
-        )),
         (Err(_), None) if python_rejects => None,
+        (Ok(_), None) if WARNED_DIFFERENCES.contains(&case.name.as_str()) => None,
         (Ok(view), None) if view == case.python => None,
         (outcome, None) => Some(format!(
             "{}: rust {outcome:?}, python {}",
@@ -855,6 +874,7 @@ fn resolution_matches_python_redis() {
     let unknown_divergences: Vec<&str> = DIVERGENCES
         .iter()
         .map(|(name, _)| *name)
+        .chain(WARNED_DIFFERENCES.iter().copied())
         .filter(|name| !contract.cases.iter().any(|case| case.name == *name))
         .collect();
     let mismatches: Vec<String> = contract.cases.iter().filter_map(mismatch).collect();
