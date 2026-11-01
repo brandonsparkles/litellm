@@ -1,5 +1,8 @@
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -152,6 +155,7 @@ pub(crate) struct SentinelConnection(Arc<SentinelState>);
 struct SentinelState {
     discovery: tokio::sync::Mutex<SentinelClient>,
     current: Mutex<Option<(u64, MultiplexedConnection)>>,
+    generations: AtomicU64,
     endpoint: SentinelEndpoint,
     credentials: Credentials,
     config: AsyncConnectionConfig,
@@ -192,6 +196,7 @@ impl SentinelConnection {
         Ok(Self(Arc::new(SentinelState {
             discovery: tokio::sync::Mutex::new(builder.build()?),
             current: Mutex::new(None),
+            generations: AtomicU64::new(0),
             endpoint: endpoint.clone(),
             credentials: credentials.clone(),
             config,
@@ -227,7 +232,7 @@ impl SentinelConnection {
             .current
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let generation = current.as_ref().map_or(0, |(generation, _)| generation + 1);
+        let generation = self.0.generations.fetch_add(1, Ordering::Relaxed);
         *current = Some((generation, connection.clone()));
         Ok((generation, connection))
     }
