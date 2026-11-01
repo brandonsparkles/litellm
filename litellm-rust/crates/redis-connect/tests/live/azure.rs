@@ -1,0 +1,15 @@
+use rstest::{fixture, rstest};
+
+use super::{LiveConfig, config, roundtrip};
+
+#[fixture]
+fn azure_config() -> Option<LiveConfig> {
+    config("LITELLM_REDIS_AZURE_LIVE_CONFIG")
+}
+
+#[rstest]
+#[tokio::test]
+async fn credentials_authenticate_existing_and_fresh_connections(azure_config: Option<LiveConfig>) {
+    let Some(config) = azure_config else { return };
+    roundtrip(config).await;
+}
