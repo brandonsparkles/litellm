@@ -9,6 +9,7 @@ use litellm_circuit_breaker::Breaker;
 use litellm_secret_value::SecretValue;
 
 use crate::{ConnectError, Namespace, RedisEvents};
+use litellm_redis_types::{ClusterEndpoint, Endpoint, TlsOptions};
 
 // litellm/constants.py REDIS_SOCKET_TIMEOUT, which _coerce_redis_kwargs_types sets when socket_timeout is unset
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -56,107 +57,55 @@ impl Credentials {
     };
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum Endpoint {
-    Url { url: SecretValue, tls: TlsOptions },
-    Host(HostEndpoint),
-    Cluster(ClusterEndpoint),
-    Sentinel(SentinelEndpoint),
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct HostEndpoint {
-    pub host: String,
-    pub port: u16,
-    pub tls: Option<TlsOptions>,
-    pub db: i64,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ClusterEndpoint {
-    pub nodes: Vec<ClusterNode>,
-    pub tls: Option<TlsOptions>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ClusterNode {
-    pub host: String,
-    pub port: u16,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct SentinelEndpoint {
-    pub sentinels: Vec<ClusterNode>,
-    pub service_name: String,
-    pub sentinel_password: Option<SecretValue>,
-    pub tls: Option<TlsOptions>,
-    pub db: i64,
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct TlsOptions {
-    pub ca_certs: Option<PathBuf>,
-    pub certfile: Option<PathBuf>,
-    pub keyfile: Option<PathBuf>,
-    pub verify_certificate: bool,
-    pub check_hostname: bool,
-}
-
-impl TlsOptions {
-    pub fn verified() -> Self {
-        Self {
-            verify_certificate: true,
-            ..Self::default()
-        }
+pub(crate) fn tls_mode(tls: &TlsOptions) -> TlsMode {
+    match tls.verify_certificate {
+        true => TlsMode::Secure,
+        false => TlsMode::Insecure,
     }
+}
 
-    pub(crate) fn mode(&self) -> TlsMode {
-        match self.verify_certificate {
-            true => TlsMode::Secure,
-            false => TlsMode::Insecure,
-        }
-    }
+pub(crate) fn tls_certificates(tls: &TlsOptions) -> Result<TlsCertificates, ConnectError> {
+    let client_tls = match (&tls.certfile, &tls.keyfile) {
+        (Some(certfile), keyfile) => Some(ClientTlsConfig {
+            client_cert: read(certfile)?,
+            client_key: read(keyfile.as_ref().unwrap_or(certfile))?,
+        }),
+        (None, _) => None,
+    };
+    Ok(TlsCertificates {
+        client_tls,
+        root_cert: tls
+            .ca_certs
+            .as_ref()
+            .map(read)
+            .transpose()?
+            .map(with_system_roots),
+    })
+}
 
-    pub(crate) fn certificates(&self) -> Result<TlsCertificates, ConnectError> {
-        let client_tls = match (&self.certfile, &self.keyfile) {
-            (Some(certfile), keyfile) => Some(ClientTlsConfig {
-                client_cert: read(certfile)?,
-                client_key: read(keyfile.as_ref().unwrap_or(certfile))?,
-            }),
-            (None, _) => None,
-        };
-        Ok(TlsCertificates {
-            client_tls,
-            root_cert: self
-                .ca_certs
-                .as_ref()
-                .map(read)
-                .transpose()?
-                .map(with_system_roots),
-        })
-    }
-
-    pub(crate) fn apply(&self, info: ConnectionInfo) -> Result<ConnectionInfo, ConnectError> {
-        let tls_info = redis::Client::build_with_tls(info, self.certificates()?)?
-            .get_connection_info()
-            .clone();
-        let mut addr = match tls_info.addr().clone() {
-            ConnectionAddr::TcpTls {
-                host,
-                port,
-                tls_params,
-                ..
-            } => ConnectionAddr::TcpTls {
-                host,
-                port,
-                insecure: !self.verify_certificate,
-                tls_params,
-            },
-            addr => addr,
-        };
-        addr.set_danger_accept_invalid_hostnames(!self.check_hostname);
-        Ok(tls_info.set_addr(addr))
-    }
+pub(crate) fn apply_tls(
+    tls: &TlsOptions,
+    info: ConnectionInfo,
+) -> Result<ConnectionInfo, ConnectError> {
+    let tls_info = redis::Client::build_with_tls(info, tls_certificates(tls)?)?
+        .get_connection_info()
+        .clone();
+    let mut addr = match tls_info.addr().clone() {
+        ConnectionAddr::TcpTls {
+            host,
+            port,
+            tls_params,
+            ..
+        } => ConnectionAddr::TcpTls {
+            host,
+            port,
+            insecure: !tls.verify_certificate,
+            tls_params,
+        },
+        addr => addr,
+    };
+    addr.set_danger_accept_invalid_hostnames(!tls.check_hostname);
+    Ok(tls_info.set_addr(addr))
 }
 
 fn with_system_roots(configured: Vec<u8>) -> Vec<u8> {
@@ -191,35 +140,34 @@ pub(crate) fn addr(host: &str, port: u16, tls: Option<&TlsOptions>) -> Connectio
     }
 }
 
-impl ClusterEndpoint {
-    pub(crate) fn addrs(&self) -> impl Iterator<Item = ConnectionAddr> + '_ {
-        self.nodes
-            .iter()
-            .map(|node| addr(&node.host, node.port, self.tls.as_ref()))
-    }
+pub(crate) fn cluster_addrs(
+    endpoint: &ClusterEndpoint,
+) -> impl Iterator<Item = ConnectionAddr> + '_ {
+    endpoint
+        .nodes
+        .iter()
+        .map(|node| addr(&node.host, node.port, endpoint.tls.as_ref()))
 }
 
-impl Endpoint {
-    pub(crate) fn connection_info(
-        &self,
-        credentials: &Credentials,
-    ) -> Result<ConnectionInfo, ConnectError> {
-        let (info, tls) = match self {
-            Self::Url { url, tls } => (url.expose().into_connection_info()?, Some(tls)),
-            Self::Host(host) => {
-                let info = addr(&host.host, host.port, host.tls.as_ref()).into_connection_info()?;
-                let settings = info.redis_settings().clone().set_db(host.db);
-                (info.set_redis_settings(settings), host.tls.as_ref())
-            }
-            Self::Cluster(_) | Self::Sentinel(_) => {
-                unreachable!("cluster and sentinel endpoints build their own connection info")
-            }
-        };
-        let info = with_static_credentials(info, credentials);
-        match (tls, info.addr()) {
-            (Some(tls), ConnectionAddr::TcpTls { .. }) => tls.apply(info),
-            _ => Ok(info),
+pub(crate) fn connection_info(
+    endpoint: &Endpoint,
+    credentials: &Credentials,
+) -> Result<ConnectionInfo, ConnectError> {
+    let (info, tls) = match endpoint {
+        Endpoint::Url { url, tls } => (url.expose().into_connection_info()?, Some(tls)),
+        Endpoint::Host(host) => {
+            let info = addr(&host.host, host.port, host.tls.as_ref()).into_connection_info()?;
+            let settings = info.redis_settings().clone().set_db(host.db);
+            (info.set_redis_settings(settings), host.tls.as_ref())
         }
+        Endpoint::Cluster(_) | Endpoint::Sentinel(_) => {
+            unreachable!("cluster and sentinel endpoints build their own connection info")
+        }
+    };
+    let info = with_static_credentials(info, credentials);
+    match (tls, info.addr()) {
+        (Some(tls), ConnectionAddr::TcpTls { .. }) => apply_tls(tls, info),
+        _ => Ok(info),
     }
 }
 

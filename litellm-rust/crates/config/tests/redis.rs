@@ -5,9 +5,10 @@ use std::{
 };
 
 use litellm_config::{
-    AwsIamAuth, AzureAdAuth, CacheSettings, Config, Expected, RedisAuth, RedisEndpoint, RedisError,
-    RedisNode, RedisSettings, RedisTls, ResolvedRedis, SecretSnapshot,
+    AwsIamAuth, AzureAdAuth, CacheSettings, Config, Expected, RedisAuth, RedisError, RedisSettings,
+    ResolvedRedis, SecretSnapshot,
 };
+use litellm_redis_types::{ClusterNode, Endpoint, TlsOptions};
 use rstest::rstest;
 use tracing::{Event, Subscriber, field::Visit};
 use tracing_subscriber::{Layer, layer::Context, prelude::*};
@@ -52,7 +53,7 @@ fn resolve_cache(yaml: &str) -> Result<ResolvedRedis, RedisError> {
 
 fn cluster_ports(resolved: &ResolvedRedis) -> Vec<u16> {
     match &resolved.endpoint {
-        RedisEndpoint::Cluster(cluster) => cluster.nodes.iter().map(|node| node.port).collect(),
+        Endpoint::Cluster(cluster) => cluster.nodes.iter().map(|node| node.port).collect(),
         endpoint => panic!("expected a cluster, got {endpoint:?}"),
     }
 }
@@ -120,9 +121,9 @@ fn resolves_redis_through_the_parsed_config(
 ) {
     let resolved = resolve(yaml, environment).unwrap();
     let description = match resolved.endpoint {
-        RedisEndpoint::Url { url, .. } => format!("url:{}", url.expose()),
-        RedisEndpoint::Sentinel(sentinel) => format!("sentinel:{}", sentinel.service_name),
-        RedisEndpoint::Host(host) => format!(
+        Endpoint::Url { url, .. } => format!("url:{}", url.expose()),
+        Endpoint::Sentinel(sentinel) => format!("sentinel:{}", sentinel.service_name),
+        Endpoint::Host(host) => format!(
             "host:{}:{}:{}:{}:{}:{}",
             host.host,
             host.port,
@@ -134,7 +135,7 @@ fn resolves_redis_through_the_parsed_config(
                 .map(|timeout| timeout.as_millis().to_string())
                 .unwrap_or_else(|| "none".to_owned())
         ),
-        RedisEndpoint::Cluster(cluster) => format!(
+        Endpoint::Cluster(cluster) => format!(
             "cluster:{}",
             cluster
                 .nodes
@@ -193,7 +194,7 @@ fn an_explicit_host_keeps_environment_credentials() {
     .unwrap();
 
     assert_eq!(resolved.auth, static_auth(None, Some("environment-secret")));
-    assert!(matches!(resolved.endpoint, RedisEndpoint::Host(host) if host.tls.is_some()));
+    assert!(matches!(resolved.endpoint, Endpoint::Host(host) if host.tls.is_some()));
 }
 
 fn azure(username: Option<&str>) -> RedisAuth {
@@ -286,34 +287,34 @@ fn incomplete_aws_iam_auth_fails(#[case] yaml: &str, #[case] message: &str) {
 #[case::defaults_verify_the_certificate_but_not_the_hostname(
     "    ssl: true",
     &[],
-    Some(RedisTls { ca_certs: None, certfile: None, keyfile: None, verify_certificate: true, check_hostname: false })
+    Some(TlsOptions { ca_certs: None, certfile: None, keyfile: None, verify_certificate: true, check_hostname: false })
 )]
 #[case::every_option(
     "    ssl: true\n    ssl_ca_certs: /ca.pem\n    ssl_certfile: /client.pem\n    ssl_keyfile: /client.key\n    ssl_cert_reqs: none\n    ssl_check_hostname: true",
     &[],
-    Some(RedisTls { ca_certs: Some("/ca.pem".to_owned()), certfile: Some("/client.pem".to_owned()), keyfile: Some("/client.key".to_owned()), verify_certificate: false, check_hostname: true })
+    Some(TlsOptions { ca_certs: Some("/ca.pem".into()), certfile: Some("/client.pem".into()), keyfile: Some("/client.key".into()), verify_certificate: false, check_hostname: true })
 )]
 #[case::options_from_the_environment(
     "    ssl: true",
     &[("REDIS_SSL_CA_CERTS", "/env-ca.pem"), ("REDIS_SSL_CERT_REQS", "optional")],
-    Some(RedisTls { ca_certs: Some("/env-ca.pem".to_owned()), certfile: None, keyfile: None, verify_certificate: true, check_hostname: false })
+    Some(TlsOptions { ca_certs: Some("/env-ca.pem".into()), certfile: None, keyfile: None, verify_certificate: true, check_hostname: false })
 )]
 #[case::gcp_ca_certs_replace_the_configured_ones(
     "    ssl: true\n    ssl_ca_certs: /ca.pem\n    gcp_service_account: account\n    gcp_ssl_ca_certs: /gcp-ca.pem",
     &[],
-    Some(RedisTls { ca_certs: Some("/gcp-ca.pem".to_owned()), certfile: None, keyfile: None, verify_certificate: true, check_hostname: false })
+    Some(TlsOptions { ca_certs: Some("/gcp-ca.pem".into()), certfile: None, keyfile: None, verify_certificate: true, check_hostname: false })
 )]
 #[case::options_without_ssl_stay_plaintext("    ssl_ca_certs: /ca.pem", &[], None)]
 fn tls_options_resolve_like_redis_py(
     #[case] block: &str,
     #[case] environment: &[(&str, &str)],
-    #[case] expected: Option<RedisTls>,
+    #[case] expected: Option<TlsOptions>,
 ) {
     let yaml = format!("general_settings:\n  coordination_redis:\n    host: redis\n{block}");
 
     let resolved = resolve(&yaml, environment).unwrap();
 
-    assert!(matches!(resolved.endpoint, RedisEndpoint::Host(host) if host.tls == expected));
+    assert!(matches!(resolved.endpoint, Endpoint::Host(host) if host.tls == expected));
 }
 
 #[rstest]
@@ -348,18 +349,18 @@ fn sentinel_nodes_resolve_to_a_sentinel_endpoint(
     #[case] yaml: &str,
     #[case] environment: &[(&str, &str)],
 ) {
-    let RedisEndpoint::Sentinel(sentinel) = resolve(yaml, environment).unwrap().endpoint else {
+    let Endpoint::Sentinel(sentinel) = resolve(yaml, environment).unwrap().endpoint else {
         panic!("expected a sentinel endpoint");
     };
 
     assert_eq!(
         sentinel.sentinels,
         vec![
-            RedisNode {
+            ClusterNode {
                 host: "sentinel-a".to_owned(),
                 port: 26379
             },
-            RedisNode {
+            ClusterNode {
                 host: "sentinel-b".to_owned(),
                 port: 26380
             },
@@ -388,8 +389,8 @@ fn sentinel_nodes_resolve_to_a_sentinel_endpoint(
 fn sentinel_precedence(#[case] yaml: &str, #[case] expected: &str) {
     let resolved = resolve(yaml, &[]).unwrap();
     let description = match resolved.endpoint {
-        RedisEndpoint::Url { url, .. } => format!("url:{}", url.expose()),
-        RedisEndpoint::Sentinel(sentinel) => format!("sentinel:{}", sentinel.service_name),
+        Endpoint::Url { url, .. } => format!("url:{}", url.expose()),
+        Endpoint::Sentinel(sentinel) => format!("sentinel:{}", sentinel.service_name),
         other => panic!("unexpected {other:?}"),
     };
 
@@ -516,7 +517,7 @@ fn a_null_canonical_startup_nodes_setting_shadows_the_cache_alias() {
     )
     .unwrap();
 
-    assert!(matches!(resolved.endpoint, RedisEndpoint::Host(_)));
+    assert!(matches!(resolved.endpoint, Endpoint::Host(_)));
 }
 
 #[rstest]
@@ -526,7 +527,7 @@ fn a_missing_canonical_startup_nodes_reference_shadows_the_cache_alias() {
     )
     .unwrap();
 
-    assert!(matches!(resolved.endpoint, RedisEndpoint::Host(_)));
+    assert!(matches!(resolved.endpoint, Endpoint::Host(_)));
 }
 
 #[rstest]
@@ -621,7 +622,7 @@ fn legacy_unknown_settings_do_not_change_resolution() {
     )
     .unwrap();
 
-    assert!(matches!(resolved.endpoint, RedisEndpoint::Host(_)));
+    assert!(matches!(resolved.endpoint, Endpoint::Host(_)));
 }
 
 struct WarningCapture(Arc<Mutex<Vec<String>>>);
@@ -685,7 +686,7 @@ const DIVERGENCES: &[(&str, &str)] = &[
     ("unix_socket_path", "unix_socket_path"),
 ];
 
-fn tls_view(tls: Option<&RedisTls>) -> serde_json::Value {
+fn tls_view(tls: Option<&TlsOptions>) -> serde_json::Value {
     tls.map_or(serde_json::Value::Null, |tls| {
         serde_json::json!({
             "ca_certs": tls.ca_certs,
@@ -695,7 +696,7 @@ fn tls_view(tls: Option<&RedisTls>) -> serde_json::Value {
     })
 }
 
-fn nodes_view(nodes: &[RedisNode]) -> Vec<String> {
+fn nodes_view(nodes: &[ClusterNode]) -> Vec<String> {
     nodes
         .iter()
         .map(|node| format!("{}:{}", node.host, node.port))
@@ -708,24 +709,24 @@ fn expose(value: Option<&litellm_secret_value::SecretValue>) -> Option<&str> {
 
 fn view(resolved: &ResolvedRedis) -> serde_json::Value {
     let target = match &resolved.endpoint {
-        RedisEndpoint::Host(host) => serde_json::json!({
+        Endpoint::Host(host) => serde_json::json!({
             "mode": "host",
             "host": host.host,
             "port": host.port,
             "db": host.db,
             "tls": tls_view(host.tls.as_ref()),
         }),
-        RedisEndpoint::Url { url, tls } => serde_json::json!({
+        Endpoint::Url { url, tls } => serde_json::json!({
             "mode": "url",
             "url": url.expose(),
             "tls": tls_view(url.expose().starts_with("rediss://").then_some(tls)),
         }),
-        RedisEndpoint::Cluster(cluster) => serde_json::json!({
+        Endpoint::Cluster(cluster) => serde_json::json!({
             "mode": "cluster",
             "nodes": nodes_view(&cluster.nodes),
             "tls": tls_view(cluster.tls.as_ref()),
         }),
-        RedisEndpoint::Sentinel(sentinel) => serde_json::json!({
+        Endpoint::Sentinel(sentinel) => serde_json::json!({
             "mode": "sentinel",
             "nodes": nodes_view(&sentinel.sentinels),
             "service_name": sentinel.service_name,
@@ -836,9 +837,7 @@ fn secret_manager_values_reach_the_resolver_through_the_snapshot() {
 
     let resolved = settings.resolve(&secrets, &|_: &str| None).unwrap();
 
-    assert!(
-        matches!(&resolved.endpoint, RedisEndpoint::Host(host) if host.host == "from-the-manager")
-    );
+    assert!(matches!(&resolved.endpoint, Endpoint::Host(host) if host.host == "from-the-manager"));
     assert_eq!(resolved.auth, static_auth(None, Some("manager-secret")));
 }
 

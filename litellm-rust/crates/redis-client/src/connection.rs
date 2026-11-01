@@ -14,7 +14,8 @@ use redis::{
 };
 
 use crate::{
-    ClusterEndpoint, ConnectError, Credentials, Endpoint, SentinelEndpoint, Timeouts, config::addr,
+    ClusterEndpoint, ConnectError, Credentials, Endpoint, SentinelEndpoint, Timeouts,
+    config::{self, addr},
     error::Deployment,
 };
 
@@ -41,7 +42,7 @@ impl Connection {
     ) -> Result<Self, ConnectError> {
         match endpoint {
             Endpoint::Url { .. } | Endpoint::Host(_) => {
-                Self::standalone(endpoint.connection_info(credentials)?, timeouts)
+                Self::standalone(config::connection_info(endpoint, credentials)?, timeouts)
             }
             Endpoint::Cluster(cluster) => Self::cluster(cluster, credentials, timeouts),
             Endpoint::Sentinel(sentinel) => Ok(Self::Sentinel(SentinelConnection::new(
@@ -75,7 +76,7 @@ impl Connection {
         credentials: &Credentials,
         timeouts: Timeouts,
     ) -> Result<Self, ConnectError> {
-        let builder = ClusterClientBuilder::new(endpoint.addrs())
+        let builder = ClusterClientBuilder::new(config::cluster_addrs(endpoint))
             .tcp_settings(
                 TcpSettings::default()
                     .set_nodelay(true)
@@ -89,8 +90,8 @@ impl Connection {
             .max_retry_wait(CLUSTER_RETRY_WAIT_MS + 1);
         let builder = match &endpoint.tls {
             Some(tls) => builder
-                .tls(tls.mode())
-                .certs(tls.certificates()?)
+                .tls(config::tls_mode(tls))
+                .certs(config::tls_certificates(tls)?)
                 .danger_accept_invalid_hostnames(!tls.check_hostname),
             None => builder,
         };
@@ -181,8 +182,8 @@ impl SentinelConnection {
         };
         let builder = match &endpoint.tls {
             Some(tls) => builder
-                .set_client_to_sentinel_tls_mode(tls.mode())
-                .set_client_to_sentinel_certificates(tls.certificates()?),
+                .set_client_to_sentinel_tls_mode(config::tls_mode(tls))
+                .set_client_to_sentinel_certificates(config::tls_certificates(tls)?),
             None => builder,
         };
         let config = AsyncConnectionConfig::new()
@@ -249,16 +250,17 @@ impl SentinelConnection {
             tls: self.0.endpoint.tls.clone(),
             db: self.0.endpoint.db,
         });
-        let info = endpoint
-            .connection_info(&self.0.credentials)
-            .map_err(|error| match error {
-                ConnectError::Redis(error) => error,
-                ConnectError::TlsFile { path, .. } => RedisError::from((
-                    ErrorKind::InvalidClientConfig,
-                    "reading a Redis TLS file",
-                    path,
-                )),
-            })?;
+        let info =
+            config::connection_info(&endpoint, &self.0.credentials).map_err(
+                |error| match error {
+                    ConnectError::Redis(error) => error,
+                    ConnectError::TlsFile { path, .. } => RedisError::from((
+                        ErrorKind::InvalidClientConfig,
+                        "reading a Redis TLS file",
+                        path,
+                    )),
+                },
+            )?;
         redis::Client::open(info)
     }
 

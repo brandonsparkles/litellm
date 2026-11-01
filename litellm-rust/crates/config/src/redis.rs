@@ -1,6 +1,9 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use litellm_core_utils::settings::Lookup;
+use litellm_redis_types::{
+    ClusterEndpoint, ClusterNode as RedisNode, Endpoint, HostEndpoint, SentinelEndpoint, TlsOptions,
+};
 use litellm_router_types::Spelled;
 use litellm_secret_value::SecretValue;
 use serde::{Deserialize, Deserializer, de::Error as _};
@@ -20,8 +23,6 @@ use keys::Handling;
 pub use auth::{AwsIamAuth, AzureAdAuth, RedisAuth};
 pub use error::{Expected, RedisError};
 pub use secrets::SecretSnapshot;
-pub use sentinel::RedisSentinel;
-pub use tls::RedisTls;
 
 const SUPPORTED: &[&str] = &[
     "url",
@@ -115,39 +116,11 @@ impl<'de> Deserialize<'de> for CacheSettings {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedRedis {
-    pub endpoint: RedisEndpoint,
+    pub endpoint: Endpoint,
     pub auth: RedisAuth,
     pub namespace: Option<String>,
     pub timeout: Option<Duration>,
     pub connect_timeout: Option<Duration>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum RedisEndpoint {
-    Url { url: SecretValue, tls: RedisTls },
-    Host(RedisHost),
-    Cluster(RedisCluster),
-    Sentinel(RedisSentinel),
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct RedisHost {
-    pub host: String,
-    pub port: u16,
-    pub tls: Option<RedisTls>,
-    pub db: i64,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct RedisCluster {
-    pub nodes: Vec<RedisNode>,
-    pub tls: Option<RedisTls>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct RedisNode {
-    pub host: String,
-    pub port: u16,
 }
 
 #[derive(Clone)]
@@ -235,23 +208,23 @@ impl RedisSettings {
         let tls = ssl.then_some(tls_options);
         let db = integer(&merged, "db")?.unwrap_or(0);
         let endpoint = match (startup_nodes, url) {
-            (Some(nodes), _) => RedisEndpoint::Cluster(RedisCluster { nodes, tls }),
-            (None, Some(url)) => RedisEndpoint::Url {
+            (Some(nodes), _) => Endpoint::Cluster(ClusterEndpoint { nodes, tls }),
+            (None, Some(url)) => Endpoint::Url {
                 url: SecretValue::new(match &auth {
                     RedisAuth::Static { .. } => url,
                     _ => without_userinfo(&url),
                 }),
-                tls: RedisTls::url_default(),
+                tls: TlsOptions::verified(),
             },
             (None, None) => match sentinel::sentinel_target(&merged, lookup)? {
-                Some(target) => RedisEndpoint::Sentinel(RedisSentinel {
+                Some(target) => Endpoint::Sentinel(SentinelEndpoint {
                     sentinels: target.sentinels,
                     service_name: target.service_name,
                     sentinel_password: target.sentinel_password,
                     tls,
                     db,
                 }),
-                None => RedisEndpoint::Host(RedisHost {
+                None => Endpoint::Host(HostEndpoint {
                     host: text_value(&merged, "host").ok_or(RedisError::NoTarget)?,
                     port: integer(&merged, "port")?.unwrap_or(6379),
                     tls,
@@ -260,7 +233,7 @@ impl RedisSettings {
             },
         };
         let auth = match (&endpoint, auth) {
-            (RedisEndpoint::Url { .. }, RedisAuth::Static { username, .. }) => RedisAuth::Static {
+            (Endpoint::Url { .. }, RedisAuth::Static { username, .. }) => RedisAuth::Static {
                 username,
                 password: None,
             },

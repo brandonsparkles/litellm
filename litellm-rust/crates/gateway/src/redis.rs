@@ -233,7 +233,8 @@ fn environment_value<T>(
 mod tests {
     use std::{collections::HashMap, time::Duration};
 
-    use litellm_config::{Config, RedisAuth, RedisEndpoint, RedisError, RedisHost};
+    use litellm_config::{Config, RedisAuth, RedisError};
+    use litellm_redis_client::{Endpoint, HostEndpoint};
     use litellm_redis_testing::RedisServer;
     use rstest::rstest;
 
@@ -242,7 +243,7 @@ mod tests {
 
     fn host(name: &str, port: u16) -> Params {
         Params {
-            endpoint: RedisEndpoint::Host(RedisHost {
+            endpoint: Endpoint::Host(HostEndpoint {
                 host: name.to_owned(),
                 port,
                 tls: None,

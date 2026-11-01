@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 litellm-circuit-breaker.workspace = true
 litellm-secret-value.workspace = true
+litellm-redis-types.workspace = true
 futures-util.workspace = true
 redis = { workspace = true, features = [
     "cluster-async",

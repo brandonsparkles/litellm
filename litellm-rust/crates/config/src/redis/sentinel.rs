@@ -1,19 +1,10 @@
+use litellm_redis_types::ClusterNode as RedisNode;
 use litellm_secret_value::SecretValue;
 
 use super::{
-    Expected, Kwargs, Lookup, RedisError, RedisNode, RedisTls, as_text, invalid, keys,
-    secret_value, text_value,
+    Expected, Kwargs, Lookup, RedisError, as_text, invalid, keys, secret_value, text_value,
 };
 use crate::Value;
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct RedisSentinel {
-    pub sentinels: Vec<RedisNode>,
-    pub service_name: String,
-    pub sentinel_password: Option<SecretValue>,
-    pub tls: Option<RedisTls>,
-    pub db: i64,
-}
 
 pub(super) struct SentinelTarget {
     pub(super) sentinels: Vec<RedisNode>,

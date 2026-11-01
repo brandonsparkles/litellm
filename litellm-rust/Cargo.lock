@@ -3705,6 +3705,7 @@ version = "0.1.0"
 dependencies = [
  "litellm-core-utils",
  "litellm-error",
+ "litellm-redis-types",
  "litellm-router-types",
  "litellm-secret-value",
  "rstest",
@@ -4420,6 +4421,7 @@ dependencies = [
  "futures-util",
  "litellm-circuit-breaker",
  "litellm-redis-testing",
+ "litellm-redis-types",
  "litellm-secret-value",
  "pem",
  "redis",
@@ -4456,6 +4458,13 @@ dependencies = [
  "testcontainers-modules",
  "thiserror 2.0.19",
  "tokio",
+]
+
+[[package]]
+name = "litellm-redis-types"
+version = "0.1.0"
+dependencies = [
+ "litellm-secret-value",
 ]
 
 [[package]]

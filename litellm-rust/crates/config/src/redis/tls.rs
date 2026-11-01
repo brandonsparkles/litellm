@@ -1,30 +1,11 @@
+use litellm_redis_types::TlsOptions;
+
 use super::{Expected, Kwargs, RedisError, bool_value, parsed, text_value};
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct RedisTls {
-    pub ca_certs: Option<String>,
-    pub certfile: Option<String>,
-    pub keyfile: Option<String>,
-    pub verify_certificate: bool,
-    pub check_hostname: bool,
-}
-
-impl RedisTls {
-    pub(super) fn url_default() -> Self {
-        Self {
-            ca_certs: None,
-            certfile: None,
-            keyfile: None,
-            verify_certificate: true,
-            check_hostname: false,
-        }
-    }
-}
 
 pub(super) fn tls_options(
     merged: &Kwargs,
     gcp_ca_certs: Option<String>,
-) -> Result<RedisTls, RedisError> {
+) -> Result<TlsOptions, RedisError> {
     let verify_certificate =
         parsed(
             merged,
@@ -37,10 +18,12 @@ pub(super) fn tls_options(
             },
         )?
         .unwrap_or(true);
-    Ok(RedisTls {
-        ca_certs: gcp_ca_certs.or_else(|| text_value(merged, "ssl_ca_certs")),
-        certfile: text_value(merged, "ssl_certfile"),
-        keyfile: text_value(merged, "ssl_keyfile"),
+    Ok(TlsOptions {
+        ca_certs: gcp_ca_certs
+            .or_else(|| text_value(merged, "ssl_ca_certs"))
+            .map(Into::into),
+        certfile: text_value(merged, "ssl_certfile").map(Into::into),
+        keyfile: text_value(merged, "ssl_keyfile").map(Into::into),
         verify_certificate,
         check_hostname: bool_value(merged, "ssl_check_hostname"),
     })
