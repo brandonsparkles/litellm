@@ -891,12 +891,16 @@ class HostRegistry(HostModelInfo):
             self._core_model_name_to_deployment_indices = {}
             self._core_team_model_to_deployment_indices = {}
             self._core_team_public_model_names = frozenset()
-            for idx, entry in enumerate(entries):
+            # An entry without an id is kept as given but never served, as on the Python core.
+            served: Final = [
+                (idx, entry) for idx, entry in enumerate(entries) if _model_info_of(entry).get("id") is not None
+            ]
+            for idx, entry in served:
                 model_name = entry.get("model_name")
                 if model_name:
                     self._core_model_name_to_deployment_indices.setdefault(str(model_name), []).append(idx)
                 self._update_team_model_index(entry, idx)
-            self._core_model_names = {str(entry["model_name"]) for entry in entries if entry.get("model_name")}
+            self._core_model_names = {str(entry["model_name"]) for _, entry in served if entry.get("model_name")}
             self._access_groups_cache = None
             self._invalidate_model_group_info_cache()
             self._registry_version += 1

@@ -4,6 +4,7 @@ access groups; blocked and unhealthy groups; credentials lookups.
 """
 
 import time
+from typing import Final
 
 import pytest
 
@@ -684,3 +685,15 @@ def test_assigning_model_list_swaps_and_reindexes_the_list(make_core: MakeCore) 
     assert found.model_name == "n"
     assert ids(core.registry().deployments("n")) == ["n"]
     assert core.registry().deployments("gpt") == []
+
+
+def test_an_entry_assigned_without_an_id_is_not_served(make_core: MakeCore) -> None:
+    """``model_list = [...]`` keeps entries as given; one without ``model_info.id`` is never routed to."""
+    core = make_core(model_list=[deployment("gpt", "a")])
+    entry: Final = {"model_name": "b", "litellm_params": {"model": "openai/gpt-4o-mini"}}
+
+    with pytest.warns(DeprecationWarning, match=r"Router\.model_list is deprecated"):  # pyright: ignore[reportUnknownMemberType]  # untyped in the checker's view
+        core.model_list = [entry]  # pyright: ignore[reportAttributeAccessIssue]  # deprecated attribute, still assignable
+
+    assert core.registry().deployments("b") == []
+    assert core.registry().names(kind="ids") == []
