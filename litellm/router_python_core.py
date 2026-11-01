@@ -13277,7 +13277,7 @@ class PythonCore(DeprecatedRouterMembers):
         self._core_team_public_model_names = frozenset()
 
         for idx, model in enumerate(model_list):
-            if (as_str_mapping(model.get("model_info")) or {}).get("id") is None:
+            if (as_str_mapping(model.get("model_info")) or {}).get("id") is None:  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # an entry of the untyped list
                 # An entry without an id (only ``router.model_list = [...]`` keeps one as given) is
                 # never served, as before that assignment reindexed: routing keys on the id.
                 continue
