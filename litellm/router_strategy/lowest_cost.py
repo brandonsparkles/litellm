@@ -229,7 +229,7 @@ class LowestCostLoggingHandler(CustomLogger):
 
     def _lowest_cost_deployment(  # pyright: ignore[reportUnknownParameterType]  # noqa: ANN202  # the selector's untyped deployment dict
         self,
-        request_count_dict: Mapping,  # pyright: ignore[reportMissingTypeArgument, reportUnknownParameterType]  # the untyped cached usage map, as the cache returns it
+        request_count_dict: dict | None,  # pyright: ignore[reportMissingTypeArgument, reportUnknownParameterType]  # mutable-ok: the untyped cached usage map, filled in place as before
         healthy_deployments: list,  # pyright: ignore[reportMissingTypeArgument, reportUnknownParameterType]  # mutable-ok: the router's list of deployment dicts
         messages: list[dict[str, str]] | None,  # mutable-ok: the request's messages, as given
         input: str | list | None,  # pyright: ignore[reportMissingTypeArgument, reportUnknownParameterType]  # mutable-ok: the request's input, as given
