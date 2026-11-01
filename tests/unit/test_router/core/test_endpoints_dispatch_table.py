@@ -86,6 +86,13 @@ def test_every_table_row_has_a_known_dispatch_and_every_call_type_one_dispatch()
         dispatch_for("nope")
 
 
+def test_every_table_endpoint_is_declared_on_the_python_core_for_type_checkers():
+    from litellm.router_python_core import PythonCore, TableEndpoint
+
+    declared: Final = {name for name, kind in PythonCore.__annotations__.items() if kind == TableEndpoint}
+    assert declared == set(ENDPOINTS)
+
+
 async def test_a_renamed_host_function_keeps_the_stream_timeout_split(make_core: MakeCore, host: RenamingHost):
     core: Final = make_core(model_list=[deployment("g", "d1", timeout=11, stream_timeout=3)])
     await getattr(core, "aresponses")(model="g", input="hi", stream=True)

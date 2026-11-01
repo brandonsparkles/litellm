@@ -1357,6 +1357,10 @@ def _base_model_widened_window(
 _SETTING_ATTRIBUTES: Final = frozenset("_core_" + name for name in SETTING_FIELDS)
 
 
+# A table-bound endpoint: its arguments and result depend on the endpoint, as before the table.
+TableEndpoint: TypeAlias = Callable[..., Any]  # each endpoint keeps its litellm signature
+
+
 class PythonCore(DeprecatedRouterMembers):
     _core_model_names: set[str] = set()
     _core_cache_responses: bool | None = False
@@ -1364,6 +1368,137 @@ class PythonCore(DeprecatedRouterMembers):
     # Bumped by every ``apply``: the static arguments plus ``_core_applied`` are the settings.
     _settings_version: int = 0
     _core_applied: Mapping[str, object] = MappingProxyType({})
+
+    # The endpoints of litellm/router_endpoint_table.py, bound per instance by _bind_endpoints; declared
+    # here so type checkers see them on the core and on Router.
+    _arealtime: TableEndpoint
+    _aresponses_websocket: TableEndpoint
+    a_add_message: TableEndpoint
+    aadapter_generate_content: TableEndpoint
+    aanthropic_messages: TableEndpoint
+    acancel_fine_tuning_job: TableEndpoint
+    acancel_interaction: TableEndpoint
+    acancel_responses: TableEndpoint
+    acompact_responses: TableEndpoint
+    acreate_agent: TableEndpoint
+    acreate_assistants: TableEndpoint
+    acreate_container: TableEndpoint
+    acreate_fine_tuning_job: TableEndpoint
+    acreate_interaction: TableEndpoint
+    acreate_realtime_client_secret: TableEndpoint
+    acreate_realtime_transcription_session: TableEndpoint
+    acreate_skill: TableEndpoint
+    acreate_thread: TableEndpoint
+    adecisions: TableEndpoint
+    adelete_agent: TableEndpoint
+    adelete_assistant: TableEndpoint
+    adelete_container: TableEndpoint
+    adelete_container_file: TableEndpoint
+    adelete_interaction: TableEndpoint
+    adelete_responses: TableEndpoint
+    adelete_skill: TableEndpoint
+    aextraction: TableEndpoint
+    afile_content: TableEndpoint
+    afile_delete: TableEndpoint
+    afile_list: TableEndpoint
+    agenerate_content: TableEndpoint
+    agenerate_content_stream: TableEndpoint
+    aget_agent: TableEndpoint
+    aget_assistants: TableEndpoint
+    aget_interaction: TableEndpoint
+    aget_messages: TableEndpoint
+    aget_responses: TableEndpoint
+    aget_skill: TableEndpoint
+    aget_thread: TableEndpoint
+    aimage_edit: TableEndpoint
+    alist_agent_versions: TableEndpoint
+    alist_agents: TableEndpoint
+    alist_container_files: TableEndpoint
+    alist_containers: TableEndpoint
+    alist_fine_tuning_jobs: TableEndpoint
+    alist_input_items: TableEndpoint
+    alist_skills: TableEndpoint
+    allm_passthrough_route: TableEndpoint
+    amoderation: TableEndpoint
+    anthropic_messages: TableEndpoint
+    aocr: TableEndpoint
+    arealtime_calls: TableEndpoint
+    aresponses: TableEndpoint
+    aretrieve_container: TableEndpoint
+    aretrieve_container_file: TableEndpoint
+    aretrieve_container_file_content: TableEndpoint
+    aretrieve_fine_tuning_job: TableEndpoint
+    arun_thread: TableEndpoint
+    asearch: TableEndpoint
+    asystemone: TableEndpoint
+    aupload_container_file: TableEndpoint
+    avector_store_delete: TableEndpoint
+    avector_store_file_content: TableEndpoint
+    avector_store_file_create: TableEndpoint
+    avector_store_file_delete: TableEndpoint
+    avector_store_file_list: TableEndpoint
+    avector_store_file_retrieve: TableEndpoint
+    avector_store_file_update: TableEndpoint
+    avector_store_list: TableEndpoint
+    avector_store_retrieve: TableEndpoint
+    avector_store_search: TableEndpoint
+    avector_store_update: TableEndpoint
+    avideo_content: TableEndpoint
+    avideo_create_character: TableEndpoint
+    avideo_edit: TableEndpoint
+    avideo_extension: TableEndpoint
+    avideo_generation: TableEndpoint
+    avideo_get_character: TableEndpoint
+    avideo_list: TableEndpoint
+    avideo_remix: TableEndpoint
+    avideo_status: TableEndpoint
+    cancel_interaction: TableEndpoint
+    create_agent: TableEndpoint
+    create_container: TableEndpoint
+    create_interaction: TableEndpoint
+    decisions: TableEndpoint
+    delete_agent: TableEndpoint
+    delete_container: TableEndpoint
+    delete_container_file: TableEndpoint
+    delete_interaction: TableEndpoint
+    extraction: TableEndpoint
+    generate_content: TableEndpoint
+    generate_content_stream: TableEndpoint
+    get_agent: TableEndpoint
+    get_interaction: TableEndpoint
+    list_agent_versions: TableEndpoint
+    list_agents: TableEndpoint
+    list_container_files: TableEndpoint
+    list_containers: TableEndpoint
+    ocr: TableEndpoint
+    responses: TableEndpoint
+    retrieve_container: TableEndpoint
+    retrieve_container_file: TableEndpoint
+    retrieve_container_file_content: TableEndpoint
+    search: TableEndpoint
+    systemone: TableEndpoint
+    upload_container_file: TableEndpoint
+    vector_store_create: TableEndpoint
+    vector_store_delete: TableEndpoint
+    vector_store_file_content: TableEndpoint
+    vector_store_file_create: TableEndpoint
+    vector_store_file_delete: TableEndpoint
+    vector_store_file_list: TableEndpoint
+    vector_store_file_retrieve: TableEndpoint
+    vector_store_file_update: TableEndpoint
+    vector_store_list: TableEndpoint
+    vector_store_retrieve: TableEndpoint
+    vector_store_search: TableEndpoint
+    vector_store_update: TableEndpoint
+    video_content: TableEndpoint
+    video_create_character: TableEndpoint
+    video_edit: TableEndpoint
+    video_extension: TableEndpoint
+    video_generation: TableEndpoint
+    video_get_character: TableEndpoint
+    video_list: TableEndpoint
+    video_remix: TableEndpoint
+    video_status: TableEndpoint
 
     # -- entry points: everything outside code needs besides the endpoint methods ---------------
     # See litellm/router_api.py. The members outside code used before these live in
@@ -7699,7 +7834,8 @@ class PythonCore(DeprecatedRouterMembers):
                     "vector_store",
                     "avector_store_create",
                 )
-                return await factory_fn(**kwargs)
+                created: Final = factory_fn(**kwargs)
+                return await created if inspect.isawaitable(created) else created
 
             parent_otel_span: Final = get_parent_otel_span_from_kwargs(kwargs)
             deployment: Final = await self._core_async_get_available_deployment(
@@ -7731,7 +7867,7 @@ class PythonCore(DeprecatedRouterMembers):
             custom_llm_provider = custom_llm_provider or inferred_custom_llm_provider
 
             async with self._deployment_slot(deployment=deployment, kwargs=kwargs, parent_otel_span=parent_otel_span):
-                response: Final = await self._host.invoke("vector_stores.acreate")(
+                pending_response: Final = self._host.invoke("vector_stores.acreate")(
                     **{
                         **data,
                         "custom_llm_provider": custom_llm_provider,
@@ -7740,6 +7876,7 @@ class PythonCore(DeprecatedRouterMembers):
                         **kwargs,
                     }
                 )
+                response: Final = await pending_response if inspect.isawaitable(pending_response) else pending_response
 
             self.success_calls[model_name] += 1
             verbose_router_logger.info("litellm.avector_store_create(model=%s)\x1b[32m 200 OK\x1b[0m", model_name)
@@ -8128,7 +8265,7 @@ class PythonCore(DeprecatedRouterMembers):
 
         return await original_function(**kwargs)
 
-    def factory_function(self, original_function: Callable, call_type: str = "assistants"):
+    def factory_function(self, original_function: Callable[..., object], call_type: str = "assistants"):
         """
         Creates the wrapper the router serves an endpoint of ``call_type`` with, dispatched as
         ``litellm/router_endpoint_table.py`` says. An unknown call type is refused here, when the
