@@ -9,19 +9,7 @@ use litellm_redis_store::{
 };
 use litellm_redis_testing::{RedisDeployment, Topology};
 use rstest::rstest;
-use support::{cases, connect, text, within};
-
-fn counter(case: &serde_json::Value) -> Counter {
-    Counter {
-        deployment_id: text(case, "deployment_id"),
-        model: case["model"].as_str().map(str::to_owned),
-        minute: text(case, "minute"),
-        kind: match case["kind"].as_str().unwrap() {
-            "tpm" => Kind::Tpm,
-            _ => Kind::Rpm,
-        },
-    }
-}
+use support::{connect, usage, within};
 
 fn tpm_and_rpm(model: Option<&str>) -> [Counter; 2] {
     [Kind::Tpm, Kind::Rpm].map(|kind| Counter {
@@ -40,16 +28,16 @@ async fn reads_counters_python_incremented_under_mains_keys(
     let deployment = RedisDeployment::start(topology).await.unwrap();
     let raw = connect(&deployment);
     let store = RouterUsage::new(Some(connect(&deployment)), POLICY);
-    let counters = cases("usage");
-    for (case, delta) in counters.iter().zip([7.75, 3.0]) {
-        raw.incr_by_float(&text(case, "key"), delta, Expiry::Refresh(COUNTER_TTL))
+    let cases = usage();
+    for (case, delta) in cases.iter().zip([7.75, 3.0]) {
+        raw.incr_by_float(case.key, delta, Expiry::Refresh(COUNTER_TTL))
             .await
             .unwrap();
     }
 
     assert_eq!(
         store
-            .get_many(&counters.iter().map(counter).collect::<Vec<_>>())
+            .get_many(&cases.map(|case| case.counter))
             .await
             .unwrap(),
         vec![Some(Number::Float(7.75)), Some(Number::Int(3))]
@@ -65,10 +53,10 @@ async fn deployment_increments_write_incrbyfloat_totals_with_a_refreshed_minute_
     let raw = connect(&deployment);
     let writer = RouterUsage::new(Some(connect(&deployment)), POLICY);
     let reader = RouterUsage::new(Some(connect(&deployment)), POLICY);
-    let case = &cases("usage")[0];
-    let model = case["model"].as_str();
+    let [case, _] = usage();
+    let model = case.counter.model.as_deref();
     let [tpm_key, rpm_key] =
-        ["tpm", "rpm"].map(|kind| text(case, "key").replace(":tpm:", &format!(":{kind}:")));
+        ["tpm", "rpm"].map(|kind| case.key.replace(":tpm:", &format!(":{kind}:")));
 
     writer
         .increment_deployment("dep", model, "12-34", Number::Float(5.5), 1)
@@ -107,17 +95,17 @@ async fn a_request_increment_keeps_the_window_python_started(
     let deployment = RedisDeployment::start(topology).await.unwrap();
     let raw = connect(&deployment);
     let store = RouterUsage::new(Some(connect(&deployment)), POLICY);
-    let case = &cases("usage")[1];
-    let key = text(case, "key");
-    raw.incr_by_float(&key, 1.0, Expiry::KeepExisting(Duration::from_secs(20)))
+    let [_, case] = usage();
+    let key = case.key;
+    raw.incr_by_float(key, 1.0, Expiry::KeepExisting(Duration::from_secs(20)))
         .await
         .unwrap();
 
     let total = store
-        .increment(&counter(case), Number::Int(1), COUNTER_TTL)
+        .increment(&case.counter, Number::Int(1), COUNTER_TTL)
         .await
         .unwrap();
-    let Ttl::Expires(remaining) = raw.ttl(&key).await.unwrap() else {
+    let Ttl::Expires(remaining) = raw.ttl(key).await.unwrap() else {
         panic!("{key} has no TTL");
     };
 
