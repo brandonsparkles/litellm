@@ -5,12 +5,9 @@ import logging
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from pathlib import Path
 from typing import Final
 
 import pytest
-from pydantic import TypeAdapter
-from typing_extensions import ReadOnly, TypedDict
 
 import litellm
 from litellm._internal_context import current_service_target
@@ -22,19 +19,46 @@ from litellm.rust_bridge._native import NativeRouterCooldowns
 from litellm.rust_bridge.host import settings
 from litellm.types.secret_managers.main import KeyManagementSettings, KeyManagementSystem
 
-_WIRE: Final = Path(__file__).parents[4] / "litellm-rust/crates/redis-store/tests/fixtures/router_wire.json"
+
+@dataclass(frozen=True, slots=True)
+class _WireCooldown:
+    """One cooldown as main's ``RedisCache`` writes it (``str(value)``) and reads it (``json.loads`` then
+    ``ast.literal_eval``). The same literals sit in ``litellm-rust/crates/redis-store/tests/support/mod.rs``,
+    where real Redis is checked to hold them after the Rust store writes."""
+
+    cooldown: CooldownCacheValue
+    str_dict: str
+    json: str
+    ttl_seconds: float
+    redis_ttl_seconds: int
 
 
-class _WireCooldown(TypedDict):
-    cooldown: ReadOnly[dict[str, str | int | float]]
-    str_dict: ReadOnly[str]
-    json: ReadOnly[str]
-    ttl_seconds: ReadOnly[float]
-    redis_ttl_seconds: ReadOnly[int]
-
-
-class _Wire(TypedDict):
-    cooldowns: ReadOnly[list[_WireCooldown]]
+_WIRE_COOLDOWNS: Final = (
+    _WireCooldown(
+        cooldown={
+            "exception_received": "RateLimitError: limited é 'quoted'",
+            "status_code": "429",
+            "timestamp": 1730000000.25,
+            "cooldown_time": 60,
+        },
+        str_dict="{'exception_received': \"RateLimitError: limited é 'quoted'\", 'status_code': '429', 'timestamp': 1730000000.25, 'cooldown_time': 60}",
+        json='{"exception_received": "RateLimitError: limited \\u00e9 \'quoted\'", "status_code": "429", "timestamp": 1730000000.25, "cooldown_time": 60}',
+        ttl_seconds=90.5,
+        redis_ttl_seconds=90,
+    ),
+    _WireCooldown(
+        cooldown={
+            "exception_received": "Timeout",
+            "status_code": "408",
+            "timestamp": 1730000000.5,
+            "cooldown_time": 0.5,
+        },
+        str_dict="{'exception_received': 'Timeout', 'status_code': '408', 'timestamp': 1730000000.5, 'cooldown_time': 0.5}",
+        json='{"exception_received": "Timeout", "status_code": "408", "timestamp": 1730000000.5, "cooldown_time": 0.5}',
+        ttl_seconds=30.0,
+        redis_ttl_seconds=30,
+    ),
+)
 
 
 def _entry(model_id: str = "dep") -> CooldownCacheValue:
@@ -137,13 +161,12 @@ def test_minimum_falls_back_to_the_default_when_nothing_or_zero_is_stored(
     assert store.minimum(["dep"], 60.0, None) == expected
 
 
-def test_the_wire_fixture_is_what_mains_codec_writes_and_reads() -> None:
-    wire: Final = TypeAdapter(_Wire).validate_json(_WIRE.read_text())
-    for case in wire["cooldowns"]:
-        assert str(case["cooldown"]) == case["str_dict"]
-        assert ast.literal_eval(case["str_dict"]) == case["cooldown"]
-        assert json.loads(case["json"]) == case["cooldown"]
-        assert int(case["ttl_seconds"]) == case["redis_ttl_seconds"]
+@pytest.mark.parametrize("case", _WIRE_COOLDOWNS, ids=("rate-limit", "timeout"))
+def test_the_wire_cases_are_what_mains_codec_writes_and_reads(case: _WireCooldown) -> None:
+    assert str(case.cooldown) == case.str_dict
+    assert ast.literal_eval(case.str_dict) == case.cooldown
+    assert json.loads(case.json) == case.cooldown
+    assert int(case.ttl_seconds) == case.redis_ttl_seconds
 
 
 @pytest.mark.parametrize(
