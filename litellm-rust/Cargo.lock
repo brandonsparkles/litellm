@@ -4424,6 +4424,7 @@ dependencies = [
  "pem",
  "redis",
  "rstest",
+ "rustls 0.23.42",
  "rustls-native-certs",
  "socket2 0.6.5",
  "thiserror 2.0.19",
