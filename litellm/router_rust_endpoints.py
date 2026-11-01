@@ -1729,7 +1729,7 @@ class RustEndpoints:
 
     async def asearch(
         self,
-        custom_llm_provider: str | None = None,
+        custom_llm_provider: object = None,
         client: object = None,
         **kwargs: object,  # kwargs-ok: the request
     ) -> object:
@@ -1744,7 +1744,7 @@ class RustEndpoints:
 
     def search(
         self,
-        custom_llm_provider: str | None = None,
+        custom_llm_provider: object = None,
         client: object = None,
         **kwargs: object,  # kwargs-ok: the request
     ) -> object:
@@ -1755,8 +1755,11 @@ class RustEndpoints:
             raise ValueError("search_tool_name or model parameter is required for search")
         request: Final = {key: value for key, value in kwargs.items() if key != "model"}
         prepared: Final = prepare_request(
-            PLANS["asearch"], request, str(search_tool_name), self._core._resolved.model_group_alias
-        )  # pyright: ignore[reportPrivateUsage]  # the endpoints serve their own core
+            PLANS["asearch"],
+            request,
+            str(search_tool_name),
+            self._core._resolved.model_group_alias,  # pyright: ignore[reportPrivateUsage]  # the endpoints serve their own core
+        )
         tools: Final = [as_dict(tool) for tool in self.search_tools]
         return self._invoke(ENDPOINTS["search"].host_op)(**search_tool_call(tools, str(search_tool_name), prepared))
 
