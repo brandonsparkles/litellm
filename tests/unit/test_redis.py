@@ -1,7 +1,7 @@
-import importlib.util
 import inspect
 import json
-from pathlib import Path
+import os
+from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Final
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import redis
 import redis.asyncio as async_redis
+from pydantic import TypeAdapter
 from redis.credentials import CredentialProvider
 
 import litellm
@@ -1964,17 +1965,973 @@ def test_async_sentinel_keeps_the_credential_provider_off_the_monitors(markers, 
     assert "password" not in master_kwargs
 
 
-def test_rust_redis_resolution_contract_matches_python():
-    generator_path: Final = (
-        Path(__file__).parents[2] / "litellm-rust" / "crates" / "config" / "tests" / "generate_redis_resolution.py"
-    )
-    spec: Final = importlib.util.spec_from_file_location("generate_redis_resolution", generator_path)
-    assert spec is not None and spec.loader is not None
-    generator: Final = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(generator)
+def _resolved_tls(connection_class: type, kwargs: Mapping[str, object]) -> dict[str, object] | None:
+    if "SSL" not in connection_class.__name__:
+        return None
+    return {
+        "ca_certs": kwargs.get("ssl_ca_certs"),
+        "certfile": kwargs.get("ssl_certfile"),
+        "keyfile": kwargs.get("ssl_keyfile"),
+        "verify_certificate": kwargs.get("ssl_cert_reqs", "required") != "none",
+        "check_hostname": bool(kwargs.get("ssl_check_hostname", False)),
+    }
 
-    assert generator.render() == generator.FIXTURE.read_text(), (
-        "litellm/_redis.py resolves Redis settings differently from redis_resolution.json, which the Rust resolver "
-        "replays. Regenerate it with `PYTHONPATH=. python litellm-rust/crates/config/tests/generate_redis_resolution.py` "
-        "and make crates/config/tests/redis.rs pass"
-    )
+
+def _resolved_auth(client_kwargs: Mapping[str, object]) -> dict[str, object]:
+    provider: Final = client_kwargs.get("credential_provider")
+    match provider:
+        case None:
+            return {
+                "kind": "static",
+                "username": client_kwargs.get("username"),
+                "password": client_kwargs.get("password"),
+            }
+        case GCPIAMCredentialProvider():
+            return {"kind": "gcp_iam", "service_account": provider._gcp_service_account}  # pyright: ignore[reportPrivateUsage]  # the provider keeps its inputs private
+        case AzureADCredentialProvider():
+            return {"kind": "azure_ad", "username": provider._username}  # pyright: ignore[reportPrivateUsage]  # the provider keeps its inputs private
+        case ElastiCacheIAMCredentialProvider():
+            return {  # pyright: ignore[reportPrivateUsage]  # the provider keeps its inputs private
+                "kind": "aws_iam",
+                "user_name": provider._user_name,  # pyright: ignore[reportPrivateUsage]  # see above
+                "cache_name": provider._cache_name,  # pyright: ignore[reportPrivateUsage]  # see above
+                "region": provider._region,  # pyright: ignore[reportPrivateUsage]  # see above
+                "serverless": provider._is_serverless,  # pyright: ignore[reportPrivateUsage]  # see above
+            }
+        case _:
+            return {"kind": "host"}
+
+
+def _cluster_target(client: async_redis.RedisCluster) -> dict[str, object]:
+    kwargs: Final = _KWARGS_ADAPTER.validate_python(client.connection_kwargs)
+    return {
+        "mode": "cluster",
+        "nodes": [f"{node.host}:{node.port}" for node in client.nodes_manager.startup_nodes.values()],
+        "tls": _resolved_tls(_CLASS_ADAPTER.validate_python(kwargs["connection_class"]), kwargs),
+        "auth": _resolved_auth(kwargs),
+    }
+
+
+def _sentinel_target(pool: async_redis.SentinelConnectionPool) -> dict[str, object]:
+    kwargs: Final = _KWARGS_ADAPTER.validate_python(pool.connection_kwargs)
+    monitors: Final = [
+        _KWARGS_ADAPTER.validate_python(sentinel.connection_pool.connection_kwargs)
+        for sentinel in pool.sentinel_manager.sentinels
+    ]
+    return {
+        "mode": "sentinel",
+        "nodes": [f"{monitor['host']}:{monitor['port']}" for monitor in monitors],
+        "service_name": pool.service_name,
+        "sentinel_password": monitors[0].get("password"),
+        "db": kwargs.get("db", 0),
+        "tls": _resolved_tls(pool.connection_class, kwargs),
+        "auth": _resolved_auth(kwargs),
+    }
+
+
+def _single_target(pool: async_redis.ConnectionPool, url: object) -> dict[str, object]:
+    kwargs: Final = _KWARGS_ADAPTER.validate_python(pool.connection_kwargs)
+    tls: Final = _resolved_tls(pool.connection_class, kwargs)
+    match pool.connection_class:
+        case async_redis.UnixDomainSocketConnection:
+            target = {"mode": "unix", "path": kwargs["path"]}
+        case _ if url is not None:
+            target = {"mode": "url", "url": url, "tls": tls}
+        case _:
+            target = {
+                "mode": "host",
+                "host": kwargs["host"],
+                "port": kwargs.get("port", 6379),
+                "db": kwargs.get("db", 0),
+                "tls": tls,
+            }
+    return {**target, "auth": _resolved_auth(kwargs)}
+
+
+_KWARGS_ADAPTER: Final = TypeAdapter(dict[str, object])
+_CLASS_ADAPTER: Final = TypeAdapter(type)
+_RESOLUTION_ENVIRONMENT_PREFIXES: Final = ("REDIS_", "AZURE_", "AWS_")
+
+
+def _resolve_like_the_rust_resolver(
+    kwargs: Mapping[str, object], values: Mapping[str, str]
+) -> dict[str, object] | None:
+    try:
+        resolved: Final = _KWARGS_ADAPTER.validate_python(
+            _credential_provider_auth_kwargs(_get_redis_client_logic(**kwargs))  # pyright: ignore[reportUnknownArgumentType]  # legacy untyped dict, validated here
+        )
+        client: Final = get_redis_async_client(**kwargs)
+    except (ValueError, TypeError, redis.exceptions.RedisClusterException):
+        return None
+    match client:
+        case async_redis.RedisCluster():
+            target = _cluster_target(client)
+        case _ if isinstance(client.connection_pool, async_redis.SentinelConnectionPool):
+            target = _sentinel_target(client.connection_pool)
+        case _:
+            target = _single_target(client.connection_pool, resolved.get("url"))
+    return {
+        **target,
+        "socket_timeout": resolved.get("socket_timeout"),
+        "socket_connect_timeout": resolved.get("socket_connect_timeout"),
+    }
+
+
+# The same cases with the same expected values are in litellm-rust/crates/config/tests/redis_resolution.rs,
+# asserted against the Rust resolver, so a resolution rule change lands in both files or fails one of them
+@pytest.mark.parametrize(
+    ("kwargs", "environment", "expected"),
+    (
+        pytest.param(
+            {"host": "redis"},
+            {},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "db": 0,
+                "host": "redis",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+            },
+            id="host_defaults",
+        ),
+        pytest.param(
+            {
+                "db": 2,
+                "host": "redis",
+                "password": "pass",
+                "port": 6380,
+                "socket_timeout": 1.5,
+                "ssl": True,
+                "username": "user",
+            },
+            {},
+            {
+                "auth": {"kind": "static", "password": "pass", "username": "user"},
+                "db": 2,
+                "host": "redis",
+                "mode": "host",
+                "port": 6380,
+                "socket_connect_timeout": None,
+                "socket_timeout": 1.5,
+                "tls": {
+                    "ca_certs": None,
+                    "certfile": None,
+                    "keyfile": None,
+                    "check_hostname": False,
+                    "verify_certificate": True,
+                },
+            },
+            id="host_with_every_basic_setting",
+        ),
+        pytest.param(
+            {},
+            {
+                "REDIS_HOST": "environment",
+                "REDIS_PASSWORD": "environment-secret",
+                "REDIS_PORT": "6390",
+                "REDIS_SSL": "True",
+            },
+            {
+                "auth": {"kind": "static", "password": "environment-secret", "username": None},
+                "db": 0,
+                "host": "environment",
+                "mode": "host",
+                "port": 6390,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": {
+                    "ca_certs": None,
+                    "certfile": None,
+                    "keyfile": None,
+                    "check_hostname": False,
+                    "verify_certificate": True,
+                },
+            },
+            id="environment_host_port_and_password",
+        ),
+        pytest.param(
+            {"db": "3", "host": "redis", "port": "6380", "socket_timeout": "2.5"},
+            {},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "db": 3,
+                "host": "redis",
+                "mode": "host",
+                "port": 6380,
+                "socket_connect_timeout": None,
+                "socket_timeout": 2.5,
+                "tls": None,
+            },
+            id="string_numbers_are_coerced",
+        ),
+        pytest.param(
+            {"host": "redis"},
+            {"REDIS_SOCKET_TIMEOUT": "0.75"},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "db": 0,
+                "host": "redis",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 0.75,
+                "tls": None,
+            },
+            id="socket_timeout_from_the_environment",
+        ),
+        pytest.param(
+            {},
+            {"REDIS_URL": "redis://environment:6379/1"},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "mode": "url",
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+                "url": "redis://environment:6379/1",
+            },
+            id="environment_url",
+        ),
+        pytest.param(
+            {},
+            {"REDIS_HOST": "ignored", "REDIS_URL": "redis://from-url:6379"},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "mode": "url",
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+                "url": "redis://from-url:6379",
+            },
+            id="environment_url_beats_the_environment_host",
+        ),
+        pytest.param(
+            {"host": "configured"},
+            {"REDIS_URL": "redis://environment:6379"},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "db": 0,
+                "host": "configured",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+            },
+            id="an_explicit_host_drops_the_environment_url",
+        ),
+        pytest.param(
+            {"db": 4, "host": "dropped", "password": "dropped", "url": "rediss://cache:6380", "username": "user"},
+            {},
+            {
+                "auth": {"kind": "static", "password": None, "username": "user"},
+                "mode": "url",
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": {
+                    "ca_certs": None,
+                    "certfile": None,
+                    "keyfile": None,
+                    "check_hostname": False,
+                    "verify_certificate": True,
+                },
+                "url": "rediss://cache:6380",
+            },
+            id="a_url_drops_host_db_and_password_and_keeps_the_username",
+        ),
+        pytest.param(
+            {
+                "ssl_ca_certs": "/ca.pem",
+                "ssl_cert_reqs": "none",
+                "ssl_check_hostname": True,
+                "url": "rediss://cache:6380",
+            },
+            {},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "mode": "url",
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": {
+                    "ca_certs": None,
+                    "certfile": None,
+                    "keyfile": None,
+                    "check_hostname": False,
+                    "verify_certificate": True,
+                },
+                "url": "rediss://cache:6380",
+            },
+            id="a_url_ignores_tls_settings_outside_the_url",
+        ),
+        pytest.param(
+            {
+                "password": "cluster-secret",
+                "startup_nodes": [{"host": "node-a", "port": 7000}],
+                "url": "redis://single:6379",
+            },
+            {},
+            {
+                "auth": {"kind": "static", "password": "cluster-secret", "username": None},
+                "mode": "cluster",
+                "nodes": ["node-a:7000"],
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+            },
+            id="startup_nodes_beat_a_url",
+        ),
+        pytest.param(
+            {},
+            {"REDIS_CLUSTER_NODES": '[{"host": "node-a", "port": "7000"}, {"host": "node-b", "port": 7001}]'},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "mode": "cluster",
+                "nodes": ["node-a:7000", "node-b:7001"],
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+            },
+            id="environment_cluster_nodes",
+        ),
+        pytest.param(
+            {
+                "ssl": "True",
+                "ssl_ca_certs": "/ca.pem",
+                "ssl_check_hostname": True,
+                "startup_nodes": [{"host": "node-a", "port": 7000}],
+            },
+            {},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "mode": "cluster",
+                "nodes": ["node-a:7000"],
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": {
+                    "ca_certs": "/ca.pem",
+                    "certfile": None,
+                    "keyfile": None,
+                    "check_hostname": True,
+                    "verify_certificate": True,
+                },
+            },
+            id="cluster_tls_options",
+        ),
+        pytest.param(
+            {
+                "password": "data-secret",
+                "sentinel_nodes": [["sentinel-a", 26379], ["sentinel-b", 26380]],
+                "sentinel_password": "sentinel-secret",
+                "service_name": "primary",
+            },
+            {},
+            {
+                "auth": {"kind": "static", "password": "data-secret", "username": None},
+                "db": 0,
+                "mode": "sentinel",
+                "nodes": ["sentinel-a:26379", "sentinel-b:26380"],
+                "sentinel_password": "sentinel-secret",
+                "service_name": "primary",
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+            },
+            id="sentinel_from_settings",
+        ),
+        pytest.param(
+            {},
+            {
+                "REDIS_SENTINEL_NODES": '[["sentinel-a", 26379]]',
+                "REDIS_SENTINEL_PASSWORD": "sentinel-secret",
+                "REDIS_SERVICE_NAME": "primary",
+            },
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "db": 0,
+                "mode": "sentinel",
+                "nodes": ["sentinel-a:26379"],
+                "sentinel_password": "sentinel-secret",
+                "service_name": "primary",
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+            },
+            id="sentinel_from_the_environment",
+        ),
+        pytest.param(
+            {"host": "ignored", "sentinel_nodes": [["sentinel-a", 26379]], "service_name": "primary"},
+            {},
+            None,
+            id="a_host_breaks_sentinel",
+        ),
+        pytest.param(
+            {"sentinel_nodes": [["sentinel-a", 26379]], "service_name": "primary", "url": "redis://single:6379"},
+            {},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "mode": "url",
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+                "url": "redis://single:6379",
+            },
+            id="a_url_beats_sentinels",
+        ),
+        pytest.param(
+            {
+                "aws_iam_auth": True,
+                "credential_provider": True,
+                "gcp_service_account": "account",
+                "host": "redis",
+                "password": "dropped",
+            },
+            {"REDIS_AZURE_AD_TOKEN": "True"},
+            {
+                "auth": {"kind": "host"},
+                "db": 0,
+                "host": "redis",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+            },
+            id="an_explicit_credential_provider_beats_cloud_auth",
+        ),
+        pytest.param(
+            {"aws_iam_auth": True, "azure_redis_ad_token": "True", "host": "redis", "password": "dropped"},
+            {"REDIS_GCP_SERVICE_ACCOUNT": "projects/-/serviceAccounts/sa@project.iam.gserviceaccount.com"},
+            {
+                "auth": {
+                    "kind": "gcp_iam",
+                    "service_account": "projects/-/serviceAccounts/sa@project.iam.gserviceaccount.com",
+                },
+                "db": 0,
+                "host": "redis",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+            },
+            id="gcp_beats_azure_and_aws",
+        ),
+        pytest.param(
+            {
+                "gcp_service_account": "account",
+                "gcp_ssl_ca_certs": "/gcp-ca.pem",
+                "host": "redis",
+                "ssl": True,
+                "ssl_ca_certs": "/configured-ca.pem",
+            },
+            {},
+            {
+                "auth": {"kind": "gcp_iam", "service_account": "account"},
+                "db": 0,
+                "host": "redis",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": {
+                    "ca_certs": "/gcp-ca.pem",
+                    "certfile": None,
+                    "keyfile": None,
+                    "check_hostname": False,
+                    "verify_certificate": True,
+                },
+            },
+            id="gcp_ca_certs_replace_the_configured_ones_under_ssl",
+        ),
+        pytest.param(
+            {
+                "aws_iam_auth": True,
+                "azure_client_id": "client",
+                "azure_client_secret": "secret",
+                "azure_redis_ad_token": True,
+                "azure_tenant_id": "tenant",
+                "host": "redis",
+                "username": "dropped",
+            },
+            {"REDIS_USERNAME": "environment-user"},
+            {
+                "auth": {"kind": "azure_ad", "username": "environment-user"},
+                "db": 0,
+                "host": "redis",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+            },
+            id="azure_beats_aws_and_takes_the_environment_username",
+        ),
+        pytest.param(
+            {
+                "azure_client_id": "client",
+                "azure_client_secret": "secret",
+                "azure_redis_ad_token": True,
+                "azure_tenant_id": "tenant",
+                "host": "redis",
+            },
+            {},
+            {
+                "auth": {"kind": "azure_ad", "username": None},
+                "db": 0,
+                "host": "redis",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+            },
+            id="azure_without_a_username_sends_only_the_token",
+        ),
+        pytest.param(
+            {
+                "azure_client_id": "client",
+                "azure_client_secret": "secret",
+                "azure_redis_ad_token": "1",
+                "azure_tenant_id": "tenant",
+                "host": "redis",
+            },
+            {},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "db": 0,
+                "host": "redis",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+            },
+            id="azure_needs_the_literal_true",
+        ),
+        pytest.param(
+            {
+                "aws_iam_auth": "yes",
+                "aws_iam_cache_name": "cache-1",
+                "aws_iam_user_name": "iam-user",
+                "host": "cache-1",
+                "password": "dropped",
+                "ssl": True,
+            },
+            {"AWS_DEFAULT_REGION": "us-east-1"},
+            {
+                "auth": {
+                    "cache_name": "cache-1",
+                    "kind": "aws_iam",
+                    "region": "us-east-1",
+                    "serverless": False,
+                    "user_name": "iam-user",
+                },
+                "db": 0,
+                "host": "cache-1",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": {
+                    "ca_certs": None,
+                    "certfile": None,
+                    "keyfile": None,
+                    "check_hostname": False,
+                    "verify_certificate": True,
+                },
+            },
+            id="aws_iam_over_tls_with_the_default_region",
+        ),
+        pytest.param(
+            {
+                "aws_iam_auth": True,
+                "aws_iam_cache_name": "cache-1",
+                "aws_iam_user_name": "iam-user",
+                "host": "cache-1",
+                "ssl": True,
+            },
+            {"AWS_DEFAULT_REGION": "us-east-1", "AWS_REGION": "eu-central-1"},
+            {
+                "auth": {
+                    "cache_name": "cache-1",
+                    "kind": "aws_iam",
+                    "region": "eu-central-1",
+                    "serverless": False,
+                    "user_name": "iam-user",
+                },
+                "db": 0,
+                "host": "cache-1",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": {
+                    "ca_certs": None,
+                    "certfile": None,
+                    "keyfile": None,
+                    "check_hostname": False,
+                    "verify_certificate": True,
+                },
+            },
+            id="aws_region_beats_the_default_region",
+        ),
+        pytest.param(
+            {
+                "aws_iam_auth": True,
+                "aws_iam_cache_name": "cache-1",
+                "aws_iam_region": "eu-west-1",
+                "aws_iam_serverless": True,
+                "aws_iam_user_name": "iam-user",
+                "url": "rediss://user:pass@cache-1:6379",
+            },
+            {},
+            {
+                "auth": {
+                    "cache_name": "cache-1",
+                    "kind": "aws_iam",
+                    "region": "eu-west-1",
+                    "serverless": True,
+                    "user_name": "iam-user",
+                },
+                "mode": "url",
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": {
+                    "ca_certs": None,
+                    "certfile": None,
+                    "keyfile": None,
+                    "check_hostname": False,
+                    "verify_certificate": True,
+                },
+                "url": "rediss://cache-1:6379",
+            },
+            id="aws_iam_serverless_over_a_rediss_url_drops_its_userinfo",
+        ),
+        pytest.param(
+            {
+                "aws_iam_auth": True,
+                "aws_iam_cache_name": "cache-1",
+                "aws_iam_region": "us-east-1",
+                "aws_iam_user_name": "iam-user",
+                "host": "cache-1",
+            },
+            {},
+            None,
+            id="aws_iam_without_tls_fails",
+        ),
+        pytest.param(
+            {
+                "aws_iam_auth": True,
+                "aws_iam_cache_name": "cache-1",
+                "aws_iam_user_name": "iam-user",
+                "host": "cache-1",
+                "ssl": True,
+            },
+            {},
+            None,
+            id="aws_iam_without_a_region_fails",
+        ),
+        pytest.param(
+            {
+                "host": "redis",
+                "ssl": True,
+                "ssl_ca_certs": "/ca.pem",
+                "ssl_cert_reqs": "none",
+                "ssl_check_hostname": True,
+            },
+            {},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "db": 0,
+                "host": "redis",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": {
+                    "ca_certs": "/ca.pem",
+                    "certfile": None,
+                    "keyfile": None,
+                    "check_hostname": True,
+                    "verify_certificate": False,
+                },
+            },
+            id="tls_options_from_settings",
+        ),
+        pytest.param(
+            {"host": "redis"},
+            {"REDIS_SSL": "True", "REDIS_SSL_CA_CERTS": "/env-ca.pem", "REDIS_SSL_CERT_REQS": "optional"},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "db": 0,
+                "host": "redis",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": {
+                    "ca_certs": "/env-ca.pem",
+                    "certfile": None,
+                    "keyfile": None,
+                    "check_hostname": False,
+                    "verify_certificate": True,
+                },
+            },
+            id="tls_options_from_the_environment",
+        ),
+        pytest.param(
+            {"host": "redis", "socket_connect_timeout": 0.25, "socket_timeout": 2.5},
+            {},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "db": 0,
+                "host": "redis",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": 0.25,
+                "socket_timeout": 2.5,
+                "tls": None,
+            },
+            id="connect_timeout_is_separate_from_the_socket_timeout",
+        ),
+        pytest.param(
+            {"host": "os.environ/COORD_HOST", "password": "os.environ/COORD_PASSWORD"},
+            {"COORD_HOST": "referenced", "COORD_PASSWORD": "referenced-secret"},
+            {
+                "auth": {"kind": "static", "password": "referenced-secret", "username": None},
+                "db": 0,
+                "host": "referenced",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+            },
+            id="environment_references_resolve",
+        ),
+        pytest.param(
+            {"port": 6379},
+            {},
+            None,
+            id="no_target_fails",
+        ),
+        pytest.param(
+            {"host": "redis", "ssl": True, "ssl_ciphers": "HIGH"},
+            {},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "db": 0,
+                "host": "redis",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": {
+                    "ca_certs": None,
+                    "certfile": None,
+                    "keyfile": None,
+                    "check_hostname": False,
+                    "verify_certificate": True,
+                },
+            },
+            id="ssl_ciphers",
+        ),
+        pytest.param(
+            {"host": "redis", "retry_on_timeout": True},
+            {},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "db": 0,
+                "host": "redis",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+            },
+            id="retry_on_timeout",
+        ),
+        pytest.param(
+            {"host": "redis", "port": "abc"},
+            {},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "db": 0,
+                "host": "redis",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+            },
+            id="malformed_port",
+        ),
+        pytest.param(
+            {"db": "first", "host": "redis"},
+            {},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "db": 0,
+                "host": "redis",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+            },
+            id="malformed_db",
+        ),
+        pytest.param(
+            {"host": "redis", "socket_timeout": "slow"},
+            {},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "db": 0,
+                "host": "redis",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+            },
+            id="socket_timeout_not_a_number",
+        ),
+        pytest.param(
+            {},
+            {"REDIS_HOST": "redis", "REDIS_PORT": "abc"},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "db": 0,
+                "host": "redis",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+            },
+            id="malformed_port_from_the_environment",
+        ),
+        pytest.param(
+            {"host": "redis", "protocol": 3},
+            {},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "db": 0,
+                "host": "redis",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+            },
+            id="protocol_3",
+        ),
+        pytest.param(
+            {"host": "redis"},
+            {"REDIS_RETRY_ON_ERROR": "True"},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "db": 0,
+                "host": "redis",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": None,
+            },
+            id="retry_on_error_from_the_environment",
+        ),
+        pytest.param(
+            {"host": "redis", "unix_socket_path": "/tmp/redis.sock"},
+            {},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "mode": "unix",
+                "path": "/tmp/redis.sock",
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+            },
+            id="unix_socket_path",
+        ),
+        pytest.param(
+            {"host": "redis", "ssl": True, "ssl_certfile": "/client.pem", "ssl_keyfile": "/client.key"},
+            {},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "db": 0,
+                "host": "redis",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": {
+                    "ca_certs": None,
+                    "certfile": "/client.pem",
+                    "keyfile": "/client.key",
+                    "check_hostname": False,
+                    "verify_certificate": True,
+                },
+            },
+            id="client_certificates",
+        ),
+        pytest.param(
+            {"url": "rediss://cache:6380/0?ssl_cert_reqs=none&ssl_ca_certs=/ca.pem&ssl_check_hostname=yes"},
+            {},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "mode": "url",
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": {
+                    "ca_certs": "/ca.pem",
+                    "certfile": None,
+                    "keyfile": None,
+                    "check_hostname": True,
+                    "verify_certificate": False,
+                },
+                "url": "rediss://cache:6380/0?ssl_cert_reqs=none&ssl_ca_certs=/ca.pem&ssl_check_hostname=yes",
+            },
+            id="a_rediss_url_takes_tls_options_from_its_query",
+        ),
+        pytest.param(
+            {"url": "rediss://cache:6380", "ssl_cert_reqs": "strict", "db": "99999999999999999999"},
+            {},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "mode": "url",
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": {
+                    "ca_certs": None,
+                    "certfile": None,
+                    "keyfile": None,
+                    "check_hostname": False,
+                    "verify_certificate": True,
+                },
+                "url": "rediss://cache:6380",
+            },
+            id="tls_settings_outside_a_url_never_fail_it",
+        ),
+        pytest.param(
+            {"startup_nodes": [{"host": "node-a", "port": 7000}], "db": 3},
+            {},
+            None,
+            id="a_cluster_rejects_a_nonzero_db",
+        ),
+    ),
+)
+def test_redis_settings_resolve_the_same_way_as_the_rust_resolver(
+    kwargs: Mapping[str, object],
+    environment: Mapping[str, str],
+    expected: dict[str, object] | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in [name for name in os.environ if name.startswith(_RESOLUTION_ENVIRONMENT_PREFIXES)]:
+        monkeypatch.delenv(name)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+
+    assert _resolve_like_the_rust_resolver(kwargs, environment) == expected
