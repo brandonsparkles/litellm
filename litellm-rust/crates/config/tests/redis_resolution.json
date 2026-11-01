@@ -47,7 +47,9 @@
         "socket_timeout": 1.5,
         "tls": {
           "ca_certs": null,
+          "certfile": null,
           "check_hostname": false,
+          "keyfile": null,
           "verify_certificate": true
         }
       }
@@ -75,7 +77,9 @@
         "socket_timeout": 5.0,
         "tls": {
           "ca_certs": null,
+          "certfile": null,
           "check_hostname": false,
+          "keyfile": null,
           "verify_certificate": true
         }
       }
@@ -210,7 +214,9 @@
         "socket_timeout": 5.0,
         "tls": {
           "ca_certs": null,
+          "certfile": null,
           "check_hostname": false,
+          "keyfile": null,
           "verify_certificate": true
         },
         "url": "rediss://cache:6380"
@@ -236,7 +242,9 @@
         "socket_timeout": 5.0,
         "tls": {
           "ca_certs": null,
+          "certfile": null,
           "check_hostname": false,
+          "keyfile": null,
           "verify_certificate": true
         },
         "url": "rediss://cache:6380"
@@ -320,7 +328,9 @@
         "socket_timeout": 5.0,
         "tls": {
           "ca_certs": "/ca.pem",
+          "certfile": null,
           "check_hostname": true,
+          "keyfile": null,
           "verify_certificate": true
         }
       }
@@ -400,23 +410,9 @@
         ],
         "service_name": "primary"
       },
-      "name": "sentinels_beat_a_host",
+      "name": "a_host_breaks_sentinel",
       "python": {
-        "auth": {
-          "kind": "static",
-          "password": null,
-          "username": null
-        },
-        "db": 0,
-        "mode": "sentinel",
-        "nodes": [
-          "sentinel-a:26379"
-        ],
-        "sentinel_password": null,
-        "service_name": "primary",
-        "socket_connect_timeout": null,
-        "socket_timeout": 5.0,
-        "tls": null
+        "rejected": true
       }
     },
     {
@@ -518,7 +514,9 @@
         "socket_timeout": 5.0,
         "tls": {
           "ca_certs": "/gcp-ca.pem",
+          "certfile": null,
           "check_hostname": false,
+          "keyfile": null,
           "verify_certificate": true
         }
       }
@@ -629,7 +627,9 @@
         "socket_timeout": 5.0,
         "tls": {
           "ca_certs": null,
+          "certfile": null,
           "check_hostname": false,
+          "keyfile": null,
           "verify_certificate": true
         }
       }
@@ -663,7 +663,9 @@
         "socket_timeout": 5.0,
         "tls": {
           "ca_certs": null,
+          "certfile": null,
           "check_hostname": false,
+          "keyfile": null,
           "verify_certificate": true
         }
       }
@@ -692,7 +694,9 @@
         "socket_timeout": 5.0,
         "tls": {
           "ca_certs": null,
+          "certfile": null,
           "check_hostname": false,
+          "keyfile": null,
           "verify_certificate": true
         },
         "url": "rediss://cache-1:6379"
@@ -750,7 +754,9 @@
         "socket_timeout": 5.0,
         "tls": {
           "ca_certs": "/ca.pem",
+          "certfile": null,
           "check_hostname": true,
+          "keyfile": null,
           "verify_certificate": false
         }
       }
@@ -779,7 +785,9 @@
         "socket_timeout": 5.0,
         "tls": {
           "ca_certs": "/env-ca.pem",
+          "certfile": null,
           "check_hostname": false,
+          "keyfile": null,
           "verify_certificate": true
         }
       }
@@ -847,6 +855,123 @@
       "kwargs": {
         "host": "redis",
         "ssl": true,
+        "ssl_certfile": "/client.pem",
+        "ssl_keyfile": "/client.key"
+      },
+      "name": "client_certificates",
+      "python": {
+        "auth": {
+          "kind": "static",
+          "password": null,
+          "username": null
+        },
+        "db": 0,
+        "host": "redis",
+        "mode": "host",
+        "port": 6379,
+        "socket_connect_timeout": null,
+        "socket_timeout": 5.0,
+        "tls": {
+          "ca_certs": null,
+          "certfile": "/client.pem",
+          "check_hostname": false,
+          "keyfile": "/client.key",
+          "verify_certificate": true
+        }
+      }
+    },
+    {
+      "environment": {},
+      "kwargs": {
+        "url": "rediss://cache:6380/0?ssl_cert_reqs=none&ssl_ca_certs=/ca.pem&ssl_check_hostname=yes"
+      },
+      "name": "a_rediss_url_takes_tls_options_from_its_query",
+      "python": {
+        "auth": {
+          "kind": "static",
+          "password": null,
+          "username": null
+        },
+        "mode": "url",
+        "socket_connect_timeout": null,
+        "socket_timeout": 5.0,
+        "tls": {
+          "ca_certs": "/ca.pem",
+          "certfile": null,
+          "check_hostname": true,
+          "keyfile": null,
+          "verify_certificate": false
+        },
+        "url": "rediss://cache:6380/0?ssl_cert_reqs=none&ssl_ca_certs=/ca.pem&ssl_check_hostname=yes"
+      }
+    },
+    {
+      "environment": {},
+      "kwargs": {
+        "url": "redis://cache:6379/0?socket_timeout=2"
+      },
+      "name": "a_url_query_setting_without_a_redis_rs_equivalent",
+      "python": {
+        "auth": {
+          "kind": "static",
+          "password": null,
+          "username": null
+        },
+        "mode": "url",
+        "socket_connect_timeout": null,
+        "socket_timeout": 5.0,
+        "tls": null,
+        "url": "redis://cache:6379/0?socket_timeout=2"
+      }
+    },
+    {
+      "environment": {},
+      "kwargs": {
+        "db": "99999999999999999999",
+        "ssl_cert_reqs": "strict",
+        "url": "rediss://cache:6380"
+      },
+      "name": "tls_settings_outside_a_url_never_fail_it",
+      "python": {
+        "auth": {
+          "kind": "static",
+          "password": null,
+          "username": null
+        },
+        "mode": "url",
+        "socket_connect_timeout": null,
+        "socket_timeout": 5.0,
+        "tls": {
+          "ca_certs": null,
+          "certfile": null,
+          "check_hostname": false,
+          "keyfile": null,
+          "verify_certificate": true
+        },
+        "url": "rediss://cache:6380"
+      }
+    },
+    {
+      "environment": {},
+      "kwargs": {
+        "db": 99999999999,
+        "startup_nodes": [
+          {
+            "host": "node-a",
+            "port": 7000
+          }
+        ]
+      },
+      "name": "db_is_not_read_for_a_cluster",
+      "python": {
+        "rejected": true
+      }
+    },
+    {
+      "environment": {},
+      "kwargs": {
+        "host": "redis",
+        "ssl": true,
         "ssl_ciphers": "HIGH"
       },
       "name": "ssl_ciphers",
@@ -864,7 +989,9 @@
         "socket_timeout": 5.0,
         "tls": {
           "ca_certs": null,
+          "certfile": null,
           "check_hostname": false,
+          "keyfile": null,
           "verify_certificate": true
         }
       }
@@ -1037,10 +1164,8 @@
           "password": null,
           "username": null
         },
-        "db": 0,
-        "host": "redis",
-        "mode": "host",
-        "port": 6379,
+        "mode": "unix",
+        "path": "/tmp/redis.sock",
         "socket_connect_timeout": null,
         "socket_timeout": 5.0,
         "tls": null

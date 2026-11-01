@@ -9,20 +9,18 @@ Regenerate from the repo root after changing either resolver:
 
 import json
 import os
-from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
-from urllib.parse import urlsplit
 
 import redis.asyncio as async_redis
+from redis.exceptions import RedisClusterException
 
 from litellm._redis import (
     _credential_provider_auth_kwargs,
     _get_redis_client_logic,
-    _get_redis_cluster_kwargs,
-    _get_redis_kwargs,
-    _get_redis_url_kwargs,
+    get_redis_async_client,
 )
 from litellm._redis_credential_provider import (
     AzureADCredentialProvider,
@@ -121,7 +119,7 @@ CASES: Final[tuple[tuple[str, Mapping[str, object], Mapping[str, str]], ...]] = 
         },
     ),
     (
-        "sentinels_beat_a_host",
+        "a_host_breaks_sentinel",
         {"host": "ignored", "sentinel_nodes": [["sentinel-a", 26379]], "service_name": "primary"},
         {},
     ),
@@ -211,6 +209,23 @@ CASES: Final[tuple[tuple[str, Mapping[str, object], Mapping[str, str]], ...]] = 
         {"COORD_HOST": "referenced", "COORD_PASSWORD": "referenced-secret"},
     ),
     ("no_target_fails", {"port": 6379}, {}),
+    (
+        "client_certificates",
+        {"host": "redis", "ssl": True, "ssl_certfile": "/client.pem", "ssl_keyfile": "/client.key"},
+        {},
+    ),
+    (
+        "a_rediss_url_takes_tls_options_from_its_query",
+        {"url": "rediss://cache:6380/0?ssl_cert_reqs=none&ssl_ca_certs=/ca.pem&ssl_check_hostname=yes"},
+        {},
+    ),
+    ("a_url_query_setting_without_a_redis_rs_equivalent", {"url": "redis://cache:6379/0?socket_timeout=2"}, {}),
+    (
+        "tls_settings_outside_a_url_never_fail_it",
+        {"url": "rediss://cache:6380", "ssl_cert_reqs": "strict", "db": "99999999999999999999"},
+        {},
+    ),
+    ("db_is_not_read_for_a_cluster", {"startup_nodes": [{"host": "node-a", "port": 7000}], "db": 99999999999}, {}),
     ("ssl_ciphers", {"host": "redis", "ssl": True, "ssl_ciphers": "HIGH"}, {}),
     ("retry_on_timeout", {"host": "redis", "retry_on_timeout": True}, {}),
     ("malformed_port", {"host": "redis", "port": "abc"}, {}),
@@ -236,70 +251,23 @@ def environment(values: Mapping[str, str]) -> Iterator[None]:
         os.environ.update(saved)
 
 
-def _picked(kwargs: Mapping[str, object], allowed: Collection[str]) -> dict[str, object]:
-    return {key: value for key, value in kwargs.items() if key in allowed}
-
-
-def _tls(kwargs: Mapping[str, object]) -> dict[str, object]:
+def _tls(connection_class: type, kwargs: Mapping[str, object]) -> dict[str, object] | None:
+    if "SSL" not in connection_class.__name__:
+        return None
     return {
         "ca_certs": kwargs.get("ssl_ca_certs"),
+        "certfile": kwargs.get("ssl_certfile"),
+        "keyfile": kwargs.get("ssl_keyfile"),
         "verify_certificate": kwargs.get("ssl_cert_reqs", "required") != "none",
         "check_hostname": bool(kwargs.get("ssl_check_hostname", False)),
     }
 
 
-def _node(node: Mapping[str, object] | Sequence[object]) -> str:
-    match node:
-        case {"host": host, "port": port}:
-            return f"{host}:{port}"
-        case [host, port]:
-            return f"{host}:{port}"
-        case _:
-            raise ValueError(f"not a Redis node: {node!r}")
-
-
-def _nodes(nodes: Iterable[Mapping[str, object] | Sequence[object]]) -> list[str]:
-    return [_node(node) for node in nodes]
-
-
-def _target(kwargs: Mapping[str, object]) -> tuple[dict[str, object], Mapping[str, object]]:
-    if "startup_nodes" in kwargs:
-        client_kwargs = _picked(kwargs, _get_redis_cluster_kwargs(async_redis.RedisCluster))
-        tls = _tls(client_kwargs) if client_kwargs.get("ssl") else None
-        return {"mode": "cluster", "nodes": _nodes(kwargs["startup_nodes"]), "tls": tls}, client_kwargs
-    if kwargs.get("url") is not None:
-        client_kwargs = _picked(kwargs, _get_redis_url_kwargs(client=async_redis.Redis))
-        url = str(kwargs["url"])
-        tls = _tls(client_kwargs) if urlsplit(url).scheme.lower() == "rediss" else None
-        return {"mode": "url", "url": url, "tls": tls}, client_kwargs
-    if "sentinel_nodes" in kwargs and "service_name" in kwargs:
-        client_kwargs = _picked(kwargs, _get_redis_kwargs())
-        return {
-            "mode": "sentinel",
-            "nodes": _nodes(kwargs["sentinel_nodes"]),
-            "service_name": kwargs["service_name"],
-            "sentinel_password": kwargs.get("sentinel_password"),
-            "db": client_kwargs.get("db", 0),
-            "tls": _tls(client_kwargs) if client_kwargs.get("ssl") else None,
-        }, client_kwargs
-    return {
-        "mode": "host",
-        "host": kwargs["host"],
-        "port": kwargs.get("port", 6379),
-        "db": kwargs.get("db", 0),
-        "tls": _tls(kwargs) if kwargs.get("ssl") else None,
-    }, kwargs
-
-
-def _auth(client_kwargs: Mapping[str, object]) -> dict[str, object]:
-    provider: Final = client_kwargs.get("credential_provider")
+def _auth(kwargs: Mapping[str, object]) -> dict[str, object]:
+    provider: Final = kwargs.get("credential_provider")
     match provider:
         case None:
-            return {
-                "kind": "static",
-                "username": client_kwargs.get("username"),
-                "password": client_kwargs.get("password"),
-            }
+            return {"kind": "static", "username": kwargs.get("username"), "password": kwargs.get("password")}
         case GCPIAMCredentialProvider():
             return {"kind": "gcp_iam", "service_account": provider._gcp_service_account}
         case AzureADCredentialProvider():
@@ -316,18 +284,63 @@ def _auth(client_kwargs: Mapping[str, object]) -> dict[str, object]:
             return {"kind": "host"}
 
 
+def _cluster(client: async_redis.RedisCluster) -> dict[str, object]:
+    kwargs: Final = client.connection_kwargs
+    return {
+        "mode": "cluster",
+        "nodes": [f"{node.host}:{node.port}" for node in client.nodes_manager.startup_nodes.values()],
+        "tls": _tls(kwargs["connection_class"], kwargs),
+        "auth": _auth(kwargs),
+    }
+
+
+def _sentinel(pool: async_redis.SentinelConnectionPool) -> dict[str, object]:
+    kwargs: Final = pool.connection_kwargs
+    monitor: Final = pool.sentinel_manager.sentinels[0].connection_pool.connection_kwargs
+    return {
+        "mode": "sentinel",
+        "nodes": [
+            "{host}:{port}".format(**sentinel.connection_pool.connection_kwargs)
+            for sentinel in pool.sentinel_manager.sentinels
+        ],
+        "service_name": pool.service_name,
+        "sentinel_password": monitor.get("password"),
+        "db": kwargs.get("db", 0),
+        "tls": _tls(pool.connection_class, kwargs),
+        "auth": _auth(kwargs),
+    }
+
+
+def _single(pool: async_redis.ConnectionPool, url: object) -> dict[str, object]:
+    kwargs: Final = pool.connection_kwargs
+    match pool.connection_class:
+        case async_redis.UnixDomainSocketConnection:
+            target = {"mode": "unix", "path": kwargs["path"]}
+        case _ if url is not None:
+            target = {"mode": "url", "url": url}
+        case _:
+            target = {"mode": "host", "host": kwargs["host"], "port": kwargs.get("port", 6379), "db": kwargs.get("db", 0)}
+    return {**target, "tls": _tls(pool.connection_class, kwargs), "auth": _auth(kwargs)}
+
+
 def resolve(kwargs: Mapping[str, object], values: Mapping[str, str]) -> dict[str, object]:
     with environment(values):
         try:
             resolved: Final = _credential_provider_auth_kwargs(_get_redis_client_logic(**kwargs))
-        except ValueError:
+            client: Final = get_redis_async_client(**kwargs)
+        except (ValueError, TypeError, RedisClusterException):
             return {"rejected": True}
-    target, client_kwargs = _target(resolved)
+    match client:
+        case async_redis.RedisCluster():
+            target = _cluster(client)
+        case _ if isinstance(client.connection_pool, async_redis.SentinelConnectionPool):
+            target = _sentinel(client.connection_pool)
+        case _:
+            target = _single(client.connection_pool, resolved.get("url"))
     return {
         **target,
-        "auth": _auth(client_kwargs),
-        "socket_timeout": client_kwargs.get("socket_timeout"),
-        "socket_connect_timeout": client_kwargs.get("socket_connect_timeout"),
+        "socket_timeout": resolved.get("socket_timeout"),
+        "socket_connect_timeout": resolved.get("socket_connect_timeout"),
     }
 
 

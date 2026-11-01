@@ -402,10 +402,6 @@ fn sentinel_nodes_resolve_to_a_sentinel_endpoint(
     "general_settings:\n  coordination_redis:\n    url: redis://single:6379\n    sentinel_nodes: [[s, 26379]]\n    service_name: primary",
     "url:redis://single:6379"
 )]
-#[case::sentinels_beat_a_host(
-    "general_settings:\n  coordination_redis:\n    host: ignored\n    sentinel_nodes: [[s, 26379]]\n    service_name: primary",
-    "sentinel:primary"
-)]
 fn sentinel_precedence(#[case] yaml: &str, #[case] expected: &str) {
     let resolved = resolve(yaml, &[]).unwrap();
     let description = match resolved.endpoint {
@@ -426,6 +422,30 @@ fn sentinels_without_a_service_name_fail() {
     .unwrap_err();
 
     assert!(matches!(error, RedisError::NoSentinelService), "{error:?}");
+}
+
+#[rstest]
+#[case::configured_host(
+    "general_settings:\n  coordination_redis:\n    host: ignored\n    sentinel_nodes: [[s, 26379]]\n    service_name: primary",
+    &[],
+    "host"
+)]
+#[case::environment_port(
+    "general_settings:\n  coordination_redis:\n    sentinel_nodes: [[s, 26379]]\n    service_name: primary",
+    &[("REDIS_PORT", "6380")],
+    "REDIS_PORT"
+)]
+fn a_host_or_port_cannot_reach_sentinel(
+    #[case] yaml: &str,
+    #[case] environment: &[(&str, &str)],
+    #[case] source: &str,
+) {
+    let error = resolve(yaml, environment).unwrap_err();
+
+    assert!(
+        matches!(&error, RedisError::SentinelWithHost { setting } if setting == source),
+        "{error:?}"
+    );
 }
 
 #[rstest]
@@ -704,12 +724,18 @@ const CONTRACT: &str = include_str!("redis_resolution.json");
 const DIVERGENCES: &[(&str, &str)] = &[
     ("ssl_ciphers", "ssl_ciphers"),
     ("unix_socket_path", "unix_socket_path"),
+    (
+        "a_url_query_setting_without_a_redis_rs_equivalent",
+        "url ?socket_timeout",
+    ),
 ];
 
 fn tls_view(tls: Option<&TlsOptions>) -> serde_json::Value {
     tls.map_or(serde_json::Value::Null, |tls| {
         serde_json::json!({
             "ca_certs": tls.ca_certs,
+            "certfile": tls.certfile,
+            "keyfile": tls.keyfile,
             "verify_certificate": tls.verify_certificate,
             "check_hostname": tls.check_hostname,
         })

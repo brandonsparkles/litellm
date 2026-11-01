@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, time::Duration};
 
 use litellm_core_utils::settings::Lookup;
 use litellm_redis_types::{
-    ClusterEndpoint, ClusterNode as RedisNode, Endpoint, HostEndpoint, SentinelEndpoint, TlsOptions,
+    ClusterEndpoint, ClusterNode as RedisNode, Endpoint, HostEndpoint, SentinelEndpoint,
 };
 use litellm_router_types::Spelled;
 use litellm_secret_value::SecretValue;
@@ -206,31 +206,39 @@ impl RedisSettings {
             }
             _ => None,
         };
-        let tls_options = tls::tls_options(&merged, gcp_ca_certs)?;
-        let tls = ssl.then_some(tls_options);
-        let db = integer(&merged, "db")?.unwrap_or(0);
+        let tls = || {
+            ssl.then(|| tls::tls_options(&merged, gcp_ca_certs.clone()))
+                .transpose()
+        };
+        let db = || integer(&merged, "db").map(|db| db.unwrap_or(0));
         let endpoint = match (startup_nodes, url) {
-            (Some(nodes), _) => Endpoint::Cluster(ClusterEndpoint { nodes, tls }),
+            (Some(nodes), _) => {
+                reject_cluster_db(&merged)?;
+                Endpoint::Cluster(ClusterEndpoint { nodes, tls: tls()? })
+            }
             (None, Some(url)) => Endpoint::Url {
+                tls: tls::url_tls(&url)?,
                 url: SecretValue::new(match &auth {
                     RedisAuth::Static { .. } => url,
                     _ => without_userinfo(&url),
                 }),
-                tls: TlsOptions::verified(),
             },
             (None, None) => match sentinel::sentinel_target(&merged, lookup)? {
-                Some(target) => Endpoint::Sentinel(SentinelEndpoint {
-                    sentinels: target.sentinels,
-                    service_name: target.service_name,
-                    sentinel_password: target.sentinel_password,
-                    tls,
-                    db,
-                }),
+                Some(target) => {
+                    reject_sentinel_host(&merged)?;
+                    Endpoint::Sentinel(SentinelEndpoint {
+                        sentinels: target.sentinels,
+                        service_name: target.service_name,
+                        sentinel_password: target.sentinel_password,
+                        tls: tls()?,
+                        db: db()?,
+                    })
+                }
                 None => Endpoint::Host(HostEndpoint {
                     host: text_value(&merged, "host").ok_or(RedisError::NoTarget)?,
                     port: integer(&merged, "port")?.unwrap_or(6379),
-                    tls,
-                    db,
+                    tls: tls()?,
+                    db: db()?,
                 }),
             },
         };
@@ -490,6 +498,33 @@ fn keeps_explicit_none(cache: bool, key: &str) -> bool {
         "gcp_ssl_ca_certs",
     ];
     cache && !NAMED_BY_CACHE.contains(&key)
+}
+
+// redis-py's RedisCluster raises unless db is 0 or None
+fn reject_cluster_db(merged: &Kwargs) -> Result<(), RedisError> {
+    let Some(entry) = merged.get("db").filter(|entry| !entry.value.is_null()) else {
+        return Ok(());
+    };
+    match integer::<i64>(merged, "db") {
+        Ok(None | Some(0)) => Ok(()),
+        _ => Err(RedisError::DbInCluster {
+            setting: entry.source.clone(),
+        }),
+    }
+}
+
+// redis.asyncio.Sentinel passes the connection kwargs to each monitor's Redis(host=..., port=...), so a host or
+// port setting raises TypeError when litellm builds the client
+fn reject_sentinel_host(merged: &Kwargs) -> Result<(), RedisError> {
+    match ["host", "port"]
+        .iter()
+        .find_map(|key| merged.get(*key).filter(|entry| !entry.value.is_null()))
+    {
+        Some(entry) => Err(RedisError::SentinelWithHost {
+            setting: entry.source.clone(),
+        }),
+        None => Ok(()),
+    }
 }
 
 fn is_set(kwargs: &Kwargs, key: &str) -> bool {

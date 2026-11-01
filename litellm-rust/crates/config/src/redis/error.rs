@@ -8,6 +8,10 @@ pub enum RedisError {
     NoTarget,
     #[error("service_name is required with sentinel_nodes")]
     NoSentinelService,
+    #[error("{setting} cannot be combined with sentinel_nodes, which redis-py rejects at startup")]
+    SentinelWithHost { setting: String },
+    #[error("{setting} must be 0 in cluster mode")]
+    DbInCluster { setting: String },
     #[error("AWS ElastiCache IAM Redis authentication requires TLS")]
     AwsIamWithoutTls,
     #[error("AWS ElastiCache IAM Redis authentication requires: {}", missing.join(", "))]
