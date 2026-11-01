@@ -25,8 +25,8 @@ impl VertexTokenSource for TokenSource {
         Box::pin(async { Ok(self.0.clone()) })
     }
 
-    fn token(&self) -> VertexAuthFuture<'_, String> {
-        Box::pin(async { Ok(self.0.clone()) })
+    fn token(&self) -> VertexAuthFuture<'_, litellm_secret_value::SecretValue> {
+        Box::pin(async { Ok(litellm_secret_value::SecretValue::new(self.0.clone())) })
     }
 }
 

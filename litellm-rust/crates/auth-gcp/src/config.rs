@@ -146,6 +146,17 @@ pub enum CredentialSource {
     Adc,
 }
 
+impl CredentialSource {
+    pub fn from_environment(env_lookup: &dyn Fn(&str) -> Option<String>) -> Self {
+        if let Some(configured) = VertexParams::CREDENTIALS.resolve(&|_| None, env_lookup) {
+            return Self::Trusted(SecretValue::new(configured));
+        }
+        non_empty_env(env_lookup, GOOGLE_APPLICATION_CREDENTIALS_ENV)
+            .map(Self::ApplicationCredentials)
+            .unwrap_or(Self::Adc)
+    }
+}
+
 pub(crate) fn credential_source(
     config: &VertexConfig,
     env_lookup: &dyn Fn(&str) -> Option<String>,
@@ -158,12 +169,7 @@ pub(crate) fn credential_source(
             }
         };
     }
-    if let Some(configured) = VertexParams::CREDENTIALS.resolve(&|_| None, env_lookup) {
-        return CredentialSource::Trusted(SecretValue::new(configured));
-    }
-    non_empty_env(env_lookup, GOOGLE_APPLICATION_CREDENTIALS_ENV)
-        .map(CredentialSource::ApplicationCredentials)
-        .unwrap_or(CredentialSource::Adc)
+    CredentialSource::from_environment(env_lookup)
 }
 
 fn optional_credentials(

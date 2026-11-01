@@ -59,6 +59,7 @@ pub(crate) enum NativeAzureRequest {
 pub(crate) struct ValidatedAzureRequest {
     request: NativeAzureRequest,
     credential_source: InputSource,
+    probe_imds: bool,
 }
 
 impl ValidatedAzureRequest {
@@ -68,7 +69,16 @@ impl ValidatedAzureRequest {
         Ok(Self {
             request,
             credential_source,
+            probe_imds: false,
         })
+    }
+
+    pub(crate) fn with_imds_probe(self, enabled: bool) -> Self {
+        Self {
+            probe_imds: enabled
+                && matches!(self.request, NativeAzureRequest::ManagedIdentity { .. }),
+            ..self
+        }
     }
 
     pub(crate) fn credential_source(&self) -> InputSource {
@@ -87,9 +97,25 @@ impl ValidatedAzureRequest {
     }
 }
 
+pub(crate) enum CredentialAttempt {
+    Resolved(ResolvedCredential),
+    Unavailable(Error),
+    Failed(Error),
+}
+
+impl CredentialAttempt {
+    pub(crate) fn into_result(self) -> Result<ResolvedCredential, Error> {
+        match self {
+            Self::Resolved(credential) => Ok(credential),
+            Self::Unavailable(error) | Self::Failed(error) => Err(error),
+        }
+    }
+}
+
 pub(crate) struct NativeAzureTokenAcquirer {
     cache: AzureCredentialProviderCache,
     transport: Option<azure_core::http::Transport>,
+    imds_available: tokio::sync::OnceCell<()>,
 }
 
 impl Default for NativeAzureTokenAcquirer {
@@ -103,6 +129,7 @@ impl NativeAzureTokenAcquirer {
         Self {
             cache: AzureCredentialProviderCache::new(cache_capacity),
             transport: None,
+            imds_available: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -114,10 +141,36 @@ impl NativeAzureTokenAcquirer {
         Self {
             cache: AzureCredentialProviderCache::new(cache_capacity),
             transport: Some(transport),
+            imds_available: tokio::sync::OnceCell::new(),
         }
     }
 
-    pub(crate) async fn acquire(
+    pub(crate) async fn acquire(&self, request: ValidatedAzureRequest) -> CredentialAttempt {
+        let discover_imds = request.probe_imds
+            && std::env::var_os("IDENTITY_ENDPOINT").is_none()
+            && std::env::var_os("MSI_ENDPOINT").is_none();
+        if discover_imds
+            && let Err(error) = self
+                .imds_available
+                .get_or_try_init(|| probe_imds(self.transport.clone().unwrap_or_default()))
+                .await
+        {
+            return CredentialAttempt::Unavailable(error);
+        }
+        match self.acquire_token(request).await {
+            Ok(credential) => CredentialAttempt::Resolved(credential),
+            Err(error) => {
+                let missing_identity = discover_imds && unassigned_identity(&error);
+                if missing_identity {
+                    CredentialAttempt::Unavailable(error)
+                } else {
+                    CredentialAttempt::Failed(error)
+                }
+            }
+        }
+    }
+
+    async fn acquire_token(
         &self,
         request: ValidatedAzureRequest,
     ) -> Result<ResolvedCredential, Error> {
@@ -146,6 +199,54 @@ impl NativeAzureTokenAcquirer {
             expires_on,
         })
     }
+}
+
+fn unassigned_identity(error: &(dyn std::error::Error + 'static)) -> bool {
+    std::iter::successors(Some(error), |cause| cause.source()).any(|cause| {
+        cause
+            .downcast_ref::<azure_core::Error>()
+            .or_else(|| {
+                cause
+                    .downcast_ref::<litellm_error::Source>()?
+                    .downcast_ref::<azure_core::Error>()
+            })
+            .is_some_and(|error| {
+                error.http_status() == Some(azure_core::http::StatusCode::BadRequest)
+            })
+    })
+}
+
+async fn probe_imds(transport: azure_core::http::Transport) -> Result<(), Error> {
+    use azure_core::http::{Context, Method, Request, Url};
+
+    let endpoint =
+        Url::parse("http://169.254.169.254/metadata/identity/oauth2/token?api-version=2019-08-01")
+            .map_err(|error| {
+                Error::InvalidConfiguration(ErrorDetail::failed("Azure IMDS probe endpoint", error))
+            })?;
+    let mut request = Request::new(endpoint, Method::Get);
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        transport.send(&Context::new(), &mut request),
+    )
+    .await
+    .map_err(|error| {
+        Error::CredentialAcquisition(ErrorDetail::failed("Azure IMDS availability probe", error))
+    })?
+    .map_err(|error| {
+        Error::CredentialAcquisition(ErrorDetail::failed("Azure IMDS availability probe", error))
+    })?;
+    // Headerless IMDS discovery expects 400, checked 2026-11-01
+    // https://learn.microsoft.com/en-us/azure/virtual-machines/instance-metadata-service#errors-and-debugging
+    if response.status() != azure_core::http::StatusCode::BadRequest {
+        return Err(Error::CredentialAcquisition(
+            ErrorDetail::UnexpectedStatus {
+                operation: "Azure IMDS availability probe",
+                status: u16::from(response.status()),
+            },
+        ));
+    }
+    Ok(())
 }
 
 impl NativeAzureRequest {
@@ -569,6 +670,151 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct AvailableImdsClient {
+        probe_status: StatusCode,
+        response_status: Option<StatusCode>,
+    }
+
+    impl HttpClient for AvailableImdsClient {
+        fn execute_request<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            request: &'life1 Request,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<AsyncRawResponse>> + Send + 'async_trait>,
+        >
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                if request
+                    .headers()
+                    .get_optional_str(&azure_core::http::headers::HeaderName::from_static(
+                        "metadata",
+                    ))
+                    .is_none()
+                {
+                    return Ok(AsyncRawResponse::from_bytes(
+                        self.probe_status,
+                        Headers::new(),
+                        "metadata header required",
+                    ));
+                }
+                if let Some(status) = self.response_status {
+                    return Ok(AsyncRawResponse::from_bytes(
+                        status,
+                        Headers::new(),
+                        "identity endpoint failure",
+                    ));
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let expires = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    + 3600;
+                Ok(AsyncRawResponse::from_bytes(
+                    StatusCode::Ok,
+                    Headers::new(),
+                    serde_json::json!({
+                        "access_token": "managed-token", "expires_on": expires.to_string(),
+                        "token_type": "Bearer", "resource": "https://service.test",
+                    })
+                    .to_string(),
+                ))
+            })
+        }
+    }
+
+    #[rstest::rstest]
+    #[tokio::test(start_paused = true)]
+    async fn available_imds_retains_full_sdk_token_acquisition() {
+        let acquirer = NativeAzureTokenAcquirer::with_transport(
+            4,
+            Transport::new(Arc::new(AvailableImdsClient {
+                probe_status: StatusCode::BadRequest,
+                response_status: None,
+            })),
+        );
+        let request = ValidatedAzureRequest::new(NativeAzureRequest::ManagedIdentity {
+            client_id: None,
+            scope: deployment("https://service.test/.default".into()),
+            selection_source: InputSource::Deployment,
+        })
+        .unwrap()
+        .with_imds_probe(true);
+        let credential = acquirer.acquire(request).await.into_result().unwrap();
+        assert_eq!(credential.secret().expose(), "managed-token");
+    }
+
+    #[rstest::rstest]
+    #[case::another_metadata_service(StatusCode::NotFound)]
+    #[case::token_required(StatusCode::Unauthorized)]
+    #[case::proxy_rejection(StatusCode::Forbidden)]
+    #[case::unavailable(StatusCode::ServiceUnavailable)]
+    #[tokio::test(start_paused = true)]
+    async fn unrelated_metadata_responses_do_not_start_managed_identity_acquisition(
+        #[case] status: StatusCode,
+    ) {
+        let acquirer = NativeAzureTokenAcquirer::with_transport(
+            4,
+            Transport::new(Arc::new(AvailableImdsClient {
+                probe_status: status,
+                response_status: None,
+            })),
+        );
+        let request = ValidatedAzureRequest::new(NativeAzureRequest::ManagedIdentity {
+            client_id: None,
+            scope: deployment("https://service.test/.default".into()),
+            selection_source: InputSource::Deployment,
+        })
+        .unwrap()
+        .with_imds_probe(true);
+        assert!(matches!(
+            acquirer.acquire(request).await,
+            super::CredentialAttempt::Unavailable(_)
+        ));
+    }
+
+    #[rstest::rstest]
+    #[case::default_identity_not_assigned(true, StatusCode::BadRequest, true)]
+    #[case::explicit_identity_not_assigned(false, StatusCode::BadRequest, false)]
+    #[case::default_identity_forbidden(true, StatusCode::Forbidden, false)]
+    #[case::default_identity_service_failure(true, StatusCode::InternalServerError, false)]
+    #[tokio::test(start_paused = true)]
+    async fn only_unavailable_default_identities_allow_fallback(
+        #[case] discovery: bool,
+        #[case] status: StatusCode,
+        #[case] unavailable: bool,
+    ) {
+        let acquirer = NativeAzureTokenAcquirer::with_transport(
+            4,
+            Transport::new(Arc::new(AvailableImdsClient {
+                probe_status: StatusCode::BadRequest,
+                response_status: Some(status),
+            })),
+        );
+        let request = ValidatedAzureRequest::new(NativeAzureRequest::ManagedIdentity {
+            client_id: None,
+            scope: deployment("https://service.test/.default".into()),
+            selection_source: InputSource::Deployment,
+        })
+        .unwrap()
+        .with_imds_probe(discovery);
+        let outcome = acquirer.acquire(request).await;
+        let is_unavailable = matches!(outcome, super::CredentialAttempt::Unavailable(_));
+        let error = outcome.into_result().unwrap_err();
+        assert_eq!(
+            is_unavailable,
+            unavailable,
+            "{}",
+            litellm_error::Report::new(&error)
+        );
+    }
+
+    #[rstest::rstest]
     #[tokio::test]
     async fn client_secret_uses_sdk_protocol_and_reuses_cached_credential() {
         let transport = Arc::new(RecordingTokenClient::default());
@@ -582,8 +828,12 @@ mod tests {
             "https://login.test",
         );
 
-        let first = acquirer.acquire(request.clone()).await.unwrap();
-        let second = acquirer.acquire(request).await.unwrap();
+        let first = acquirer
+            .acquire(request.clone())
+            .await
+            .into_result()
+            .unwrap();
+        let second = acquirer.acquire(request).await.into_result().unwrap();
 
         assert_eq!(first.secret().expose(), "native-token");
         assert_eq!(second.secret().expose(), "native-token");
@@ -599,6 +849,7 @@ mod tests {
         );
     }
 
+    #[rstest::rstest]
     #[tokio::test]
     async fn credential_provider_cache_isolates_every_client_secret_identity_field() {
         let transport = Arc::new(RecordingTokenClient::default());
@@ -645,10 +896,10 @@ mod tests {
             ),
         ];
 
-        acquirer.acquire(base.clone()).await.unwrap();
-        acquirer.acquire(base).await.unwrap();
+        acquirer.acquire(base.clone()).await.into_result().unwrap();
+        acquirer.acquire(base).await.into_result().unwrap();
         for request in variants.into_iter().skip(1) {
-            acquirer.acquire(request).await.unwrap();
+            acquirer.acquire(request).await.into_result().unwrap();
         }
 
         assert_eq!(transport.requests.lock().unwrap().len(), 6);

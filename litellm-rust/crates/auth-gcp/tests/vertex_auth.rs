@@ -10,22 +10,32 @@ use litellm_auth_gcp::{
     CredentialSource, VertexAuth, VertexAuthFuture, VertexConfig, VertexProviderLoader,
     VertexTokenSource, get_vertex_ai_location, secret_names,
 };
+use litellm_secret_value::SecretValue;
 use rstest::rstest;
 use serde_json::{Value, json};
 
 struct FakeProvider {
+    project: Option<&'static str>,
     calls: Arc<AtomicUsize>,
 }
 
 impl VertexTokenSource for FakeProvider {
     fn project_id(&self) -> VertexAuthFuture<'_, String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async { Ok("adc-project".into()) })
+        Box::pin(async move {
+            self.project
+                .map(str::to_owned)
+                .ok_or(litellm_auth_types::Error::CredentialAcquisition(
+                    litellm_auth_types::ErrorDetail::Unresolved {
+                        subject: "credential project",
+                    },
+                ))
+        })
     }
 
-    fn token(&self) -> VertexAuthFuture<'_, String> {
+    fn token(&self) -> VertexAuthFuture<'_, SecretValue> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async { Ok("adc-token".into()) })
+        Box::pin(async { Ok(SecretValue::new("adc-token")) })
     }
 }
 
@@ -51,7 +61,10 @@ fn config(value: Value) -> VertexConfig {
 }
 
 fn auth(calls: Arc<AtomicUsize>, loads: Arc<AtomicUsize>) -> VertexAuth {
-    let provider: Arc<dyn VertexTokenSource> = Arc::new(FakeProvider { calls });
+    let provider: Arc<dyn VertexTokenSource> = Arc::new(FakeProvider {
+        calls,
+        project: Some("adc-project"),
+    });
     VertexAuth::new(Arc::new(FakeLoader { loads, provider }))
 }
 
@@ -69,12 +82,11 @@ async fn secret_names_cover_environment_reads() {
         .await
         .unwrap();
     get_vertex_ai_location(&VertexConfig::default(), &env);
-    assert!(
-        seen.lock()
-            .unwrap()
-            .iter()
-            .all(|name| secret_names().contains(&name.as_str()))
-    );
+    let allowed = secret_names()
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<BTreeSet<_>>();
+    assert!(seen.lock().unwrap().is_subset(&allowed));
 }
 
 #[rstest]
@@ -107,14 +119,36 @@ async fn provider_is_reused_across_authentication_calls() {
     let calls = Arc::new(AtomicUsize::new(0));
     let loads = Arc::new(AtomicUsize::new(0));
     let auth = auth(calls.clone(), loads.clone());
-    for _ in 0..2 {
-        let environment = auth
-            .validate_environment(Vec::new(), None, &VertexConfig::default(), &|_| None)
-            .await
-            .unwrap();
-        assert_eq!(environment.project_id, "adc-project");
-        assert_eq!(environment.headers[0].1, "Bearer adc-token");
-    }
+    let config = VertexConfig::default();
+    let environment = |_: &str| None;
+    let (first, second) = tokio::try_join!(
+        auth.validate_environment(Vec::new(), None, &config, &environment),
+        auth.validate_environment(Vec::new(), None, &config, &environment),
+    )
+    .unwrap();
+    assert_eq!(first.project_id, "adc-project");
+    assert_eq!(first.headers[0].1, "Bearer adc-token");
+    assert_eq!(first.project_id, second.project_id);
+    assert_eq!(first.headers, second.headers);
     assert_eq!(loads.load(Ordering::SeqCst), 1);
     assert_eq!(calls.load(Ordering::SeqCst), 4);
+}
+
+#[rstest]
+#[tokio::test]
+async fn an_explicit_project_does_not_require_project_metadata_in_the_credentials() {
+    let auth = VertexAuth::new(Arc::new(FakeLoader {
+        loads: Arc::new(AtomicUsize::new(0)),
+        provider: Arc::new(FakeProvider {
+            calls: Arc::new(AtomicUsize::new(0)),
+            project: None,
+        }),
+    }));
+    let configured = VertexConfig::new(None, Some("configured-project".into()), None);
+    let environment = auth
+        .validate_environment(Vec::new(), None, &configured, &|_| None)
+        .await
+        .unwrap();
+    assert_eq!(environment.project_id, "configured-project");
+    assert_eq!(environment.headers[0].1, "Bearer adc-token");
 }
