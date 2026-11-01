@@ -1422,6 +1422,29 @@ def single_deployment_router():
         ]
     )
 
+@pytest.mark.parametrize("status,exception_type,policy_field", [
+    (429, litellm.RateLimitError, "RateLimitErrorAllowedFails"),
+    (503, litellm.ServiceUnavailableError, "ServiceUnavailableErrorAllowedFails"),
+])
+@pytest.mark.parametrize("policy_mode,expected", [("none", False), ("matching", True), ("unmatched", False)])
+def test_wildcard_cooldown_honors_explicit_exception_policy(
+    status: int, exception_type: type[Exception], policy_field: str, policy_mode: str, expected: bool,
+) -> None:
+    error: Final = exception_type("offline failure", "openai", "test-model")
+    configured_policy: Final = policy_field if policy_mode == "matching" else "NotFoundErrorAllowedFails"
+    router: Final = Router(model_list=[{
+        "model_name": "*",
+        "litellm_params": {"model": "openai/*", "api_key": "offline-test"},
+        "model_info": {
+            "id": "wildcard-key",
+            "allowed_fails_policy": {configured_policy: 0} if policy_mode != "none" else {},
+        },
+    }])
+    assert _should_run_cooldown_logic(router, "wildcard-key", status, error) is expected
+    if expected:
+        assert _should_cooldown_deployment(router, "wildcard-key", status, error) is True
+
+
 @pytest.mark.usefixtures("_vcr_outcome_gate", "setup_and_teardown")
 def test_should_run_cooldown_logic_generic_bad_request_excluded_by_default(
     single_deployment_router,
