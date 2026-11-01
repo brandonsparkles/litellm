@@ -13324,7 +13324,11 @@ class PythonCore(DeprecatedRouterMembers):
                 if (model_id := (as_str_mapping(entry.get("model_info")) or {}).get("id")) is not None
             }
             self._build_model_name_index(model_list)  # pyright: ignore[reportUnknownMemberType]  # the untyped index builder
-            self._core_model_names = {str(entry["model_name"]) for entry in model_list if entry.get("model_name")}
+            self._core_model_names = {
+                str(entry["model_name"])
+                for entry in model_list
+                if entry.get("model_name") and (as_str_mapping(entry.get("model_info")) or {}).get("id") is not None
+            }
             self._access_groups_cache = None
             self._invalidate_model_group_info_cache()
 
@@ -13340,6 +13344,10 @@ class PythonCore(DeprecatedRouterMembers):
         self._core_team_public_model_names = frozenset()
 
         for idx, model in enumerate(model_list):
+            if (as_str_mapping(model.get("model_info")) or {}).get("id") is None:
+                # An entry without an id (only ``router.model_list = [...]`` keeps one as given) is
+                # never served, as before that assignment reindexed: routing keys on the id.
+                continue
             model_name = model.get("model_name")
             if model_name:
                 if model_name not in self._core_model_name_to_deployment_indices:
