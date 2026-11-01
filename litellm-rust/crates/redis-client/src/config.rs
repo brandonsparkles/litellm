@@ -24,6 +24,10 @@ pub struct RedisConfig {
     pub timeouts: Timeouts,
     pub breaker: Option<Breaker>,
     pub events: Option<Arc<dyn RedisEvents>>,
+    /// Ping every node before the next command once the client sat idle this long, like
+    /// redis-py's `health_check_interval`, so a connection the server dropped silently is
+    /// replaced before a real command pays for it.
+    pub health_check: Option<Duration>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

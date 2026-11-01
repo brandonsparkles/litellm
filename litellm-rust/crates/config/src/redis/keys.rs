@@ -97,7 +97,7 @@ pub(super) const SETTINGS: &[Setting] = &[
         true,
         &["REDIS_GCP_SSL_CA_CERTS"],
     ),
-    Setting::new("health_check_interval", Handling::Warn, true, &[]),
+    Setting::new("health_check_interval", Handling::Read, true, &[]),
     Setting::new("host", Handling::Read, true, &[]),
     Setting::new("lib_name", Handling::Warn, true, &[]),
     Setting::new("lib_version", Handling::Warn, true, &[]),

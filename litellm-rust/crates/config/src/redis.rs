@@ -121,6 +121,8 @@ pub struct ResolvedRedis {
     pub namespace: Option<String>,
     pub timeout: Option<Duration>,
     pub connect_timeout: Option<Duration>,
+    /// redis-py's `health_check_interval`, which `_coerce_redis_kwargs_types` reads as an `int`
+    pub health_check_interval: Option<Duration>,
 }
 
 #[derive(Clone)]
@@ -255,6 +257,9 @@ impl RedisSettings {
             namespace: text_value(&merged, "namespace"),
             timeout: seconds(&merged, "socket_timeout")?,
             connect_timeout: seconds(&merged, "socket_connect_timeout")?,
+            health_check_interval: integer::<i64>(&merged, "health_check_interval")?
+                .filter(|seconds| *seconds > 0)
+                .map(|seconds| Duration::from_secs(seconds.unsigned_abs())),
         })
     }
 

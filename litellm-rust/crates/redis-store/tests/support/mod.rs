@@ -51,6 +51,7 @@ fn connect_with(
         timeouts: Timeouts::new(Duration::from_millis(500), None),
         breaker,
         events: None,
+        health_check: None,
     })
     .unwrap()
 }

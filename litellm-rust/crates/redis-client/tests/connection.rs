@@ -120,6 +120,7 @@ fn sentinel_client(sentinel: &RedisSentinel) -> RedisClient {
         timeouts: Timeouts::new(Duration::from_secs(1), None),
         breaker: None,
         events: None,
+        health_check: None,
     })
     .unwrap()
 }

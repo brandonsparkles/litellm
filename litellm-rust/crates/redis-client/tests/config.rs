@@ -70,6 +70,7 @@ async fn ping_over_tls(
         timeouts: litellm_redis_client::Timeouts::default(),
         breaker: None,
         events: None,
+        health_check: None,
     })
     .unwrap();
     client.ping().await
@@ -155,6 +156,7 @@ fn a_missing_tls_file_names_the_path() {
         timeouts: litellm_redis_client::Timeouts::default(),
         breaker: None,
         events: None,
+        health_check: None,
     })
     .err()
     .unwrap();

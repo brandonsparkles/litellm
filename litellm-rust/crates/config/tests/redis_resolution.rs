@@ -105,6 +105,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
         "auth": auth,
         "socket_timeout": resolved.timeout.map_or(5.0, |timeout| timeout.as_secs_f64()),
         "socket_connect_timeout": resolved.connect_timeout.map(|timeout| timeout.as_secs_f64()),
+        "health_check_interval": resolved.health_check_interval.map(|interval| interval.as_secs_f64()),
     });
     let serde_json::Value::Object(rest) = rest else {
         unreachable!("the view is an object")
@@ -123,6 +124,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": null
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "redis",
             "mode": "host",
             "port": 6379,
@@ -141,6 +143,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": "user"
             },
             "db": 2,
+            "health_check_interval": null,
             "host": "redis",
             "mode": "host",
             "port": 6380,
@@ -167,6 +170,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": null
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "environment",
             "mode": "host",
             "port": 6390,
@@ -193,6 +197,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": null
             },
             "db": 3,
+            "health_check_interval": null,
             "host": "redis",
             "mode": "host",
             "port": 6380,
@@ -211,6 +216,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": null
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "redis",
             "mode": "host",
             "port": 6379,
@@ -228,6 +234,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "password": null,
                 "username": null
             },
+            "health_check_interval": null,
             "mode": "url",
             "socket_connect_timeout": null,
             "socket_timeout": 5.0,
@@ -244,6 +251,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "password": null,
                 "username": null
             },
+            "health_check_interval": null,
             "mode": "url",
             "socket_connect_timeout": null,
             "socket_timeout": 5.0,
@@ -261,6 +269,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": null
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "configured",
             "mode": "host",
             "port": 6379,
@@ -278,6 +287,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "password": null,
                 "username": "user"
             },
+            "health_check_interval": null,
             "mode": "url",
             "socket_connect_timeout": null,
             "socket_timeout": 5.0,
@@ -302,6 +312,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "password": null,
                 "username": null
             },
+            "health_check_interval": null,
             "mode": "url",
             "socket_connect_timeout": null,
             "socket_timeout": 5.0,
@@ -326,6 +337,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "password": "cluster-secret",
                 "username": null
             },
+            "health_check_interval": null,
             "mode": "cluster",
             "nodes": [
                 "node-a:7000"
@@ -344,6 +356,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "password": null,
                 "username": null
             },
+            "health_check_interval": null,
             "mode": "cluster",
             "nodes": [
                 "node-a:7000",
@@ -363,6 +376,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "password": null,
                 "username": null
             },
+            "health_check_interval": null,
             "mode": "cluster",
             "nodes": [
                 "node-a:7000"
@@ -390,6 +404,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": null
             },
             "db": 0,
+            "health_check_interval": null,
             "mode": "sentinel",
             "nodes": [
                 "sentinel-a:26379",
@@ -412,6 +427,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": null
             },
             "db": 0,
+            "health_check_interval": null,
             "mode": "sentinel",
             "nodes": [
                 "sentinel-a:26379"
@@ -432,6 +448,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "password": null,
                 "username": null
             },
+            "health_check_interval": null,
             "mode": "url",
             "socket_connect_timeout": null,
             "socket_timeout": 5.0,
@@ -447,6 +464,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "kind": "host"
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "redis",
             "mode": "host",
             "port": 6379,
@@ -464,6 +482,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "service_account": "projects/-/serviceAccounts/sa@project.iam.gserviceaccount.com"
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "redis",
             "mode": "host",
             "port": 6379,
@@ -481,6 +500,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "service_account": "account"
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "redis",
             "mode": "host",
             "port": 6379,
@@ -506,6 +526,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": "environment-user"
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "redis",
             "mode": "host",
             "port": 6379,
@@ -523,6 +544,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": null
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "redis",
             "mode": "host",
             "port": 6379,
@@ -541,6 +563,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": null
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "redis",
             "mode": "host",
             "port": 6379,
@@ -561,6 +584,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "user_name": "iam-user"
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "cache-1",
             "mode": "host",
             "port": 6379,
@@ -589,6 +613,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "user_name": "iam-user"
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "cache-1",
             "mode": "host",
             "port": 6379,
@@ -616,6 +641,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "serverless": true,
                 "user_name": "iam-user"
             },
+            "health_check_interval": null,
             "mode": "url",
             "socket_connect_timeout": null,
             "socket_timeout": 5.0,
@@ -641,6 +667,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": null
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "redis",
             "mode": "host",
             "port": 6379,
@@ -667,6 +694,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": null
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "redis",
             "mode": "host",
             "port": 6379,
@@ -693,6 +721,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": null
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "redis",
             "mode": "host",
             "port": 6379,
@@ -711,6 +740,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": null
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "referenced",
             "mode": "host",
             "port": 6379,
@@ -729,6 +759,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": null
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "redis",
             "mode": "host",
             "port": 6379,
@@ -755,6 +786,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": null
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "redis",
             "mode": "host",
             "port": 6379,
@@ -773,6 +805,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": null
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "redis",
             "mode": "host",
             "port": 6379,
@@ -791,6 +824,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": null
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "redis",
             "mode": "host",
             "port": 6379,
@@ -809,6 +843,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": null
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "redis",
             "mode": "host",
             "port": 6379,
@@ -827,6 +862,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": null
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "redis",
             "mode": "host",
             "port": 6379,
@@ -845,6 +881,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": null
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "redis",
             "mode": "host",
             "port": 6379,
@@ -863,6 +900,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
                 "username": null
             },
             "db": 0,
+            "health_check_interval": null,
             "host": "redis",
             "mode": "host",
             "port": 6379,
@@ -882,6 +920,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
     },
     "mode": "unix",
     "path": "/tmp/redis.sock",
+    "health_check_interval": null,
     "socket_connect_timeout": null,
     "socket_timeout": 5.0
 })
@@ -897,6 +936,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
     },
     "mode": "unix",
     "path": "/tmp/redis.sock",
+    "health_check_interval": null,
     "socket_connect_timeout": null,
     "socket_timeout": 5.0
 })
@@ -914,6 +954,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
     "host": "redis",
     "mode": "host",
     "port": 6379,
+    "health_check_interval": null,
     "socket_connect_timeout": null,
     "socket_timeout": 5.0,
     "tls": {
@@ -940,6 +981,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
     "host": "redis",
     "mode": "host",
     "port": 6379,
+    "health_check_interval": null,
     "socket_connect_timeout": null,
     "socket_timeout": 5.0,
     "tls": {
@@ -966,6 +1008,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
     "host": "redis",
     "mode": "host",
     "port": 6379,
+    "health_check_interval": null,
     "socket_connect_timeout": null,
     "socket_timeout": 5.0,
     "tls": {
@@ -989,6 +1032,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
         "username": null
     },
     "mode": "url",
+    "health_check_interval": null,
     "socket_connect_timeout": null,
     "socket_timeout": 5.0,
     "tls": {
@@ -1013,6 +1057,7 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
         "username": null
     },
     "mode": "url",
+    "health_check_interval": null,
     "socket_connect_timeout": null,
     "socket_timeout": 5.0,
     "tls": {
@@ -1026,6 +1071,46 @@ fn view(resolved: &ResolvedRedis) -> serde_json::Value {
             },
     "url": "rediss://cache:6380"
 })
+)]
+#[case::health_check_interval_is_whole_seconds(
+    r#"{"health_check_interval": "7", "host": "redis"}"#,
+    &[],
+    serde_json::json!({
+            "auth": {
+                "kind": "static",
+                "password": null,
+                "username": null
+            },
+            "db": 0,
+            "health_check_interval": 7.0,
+            "host": "redis",
+            "mode": "host",
+            "port": 6379,
+            "socket_connect_timeout": null,
+            "socket_timeout": 5.0,
+            "tls": null,
+            "unix_socket_path": null
+        })
+)]
+#[case::health_check_interval_zero_is_off(
+    r#"{"health_check_interval": 0, "host": "redis"}"#,
+    &[],
+    serde_json::json!({
+            "auth": {
+                "kind": "static",
+                "password": null,
+                "username": null
+            },
+            "db": 0,
+            "health_check_interval": null,
+            "host": "redis",
+            "mode": "host",
+            "port": 6379,
+            "socket_connect_timeout": null,
+            "socket_timeout": 5.0,
+            "tls": null,
+            "unix_socket_path": null
+        })
 )]
 fn resolves_like_litellm_redis_py(
     #[case] kwargs: &str,

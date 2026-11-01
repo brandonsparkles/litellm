@@ -218,6 +218,7 @@ mod tests {
             namespace: None,
             timeout: None,
             connect_timeout: None,
+            health_check_interval: None,
         }
     }
 
