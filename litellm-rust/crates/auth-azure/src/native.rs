@@ -115,7 +115,7 @@ impl CredentialAttempt {
 pub(crate) struct NativeAzureTokenAcquirer {
     cache: AzureCredentialProviderCache,
     transport: Option<azure_core::http::Transport>,
-    imds_available: tokio::sync::OnceCell<()>,
+    imds_available: tokio::sync::OnceCell<Result<(), Error>>,
 }
 
 impl Default for NativeAzureTokenAcquirer {
@@ -146,16 +146,14 @@ impl NativeAzureTokenAcquirer {
     }
 
     pub(crate) async fn acquire(&self, request: ValidatedAzureRequest) -> CredentialAttempt {
-        let discover_imds = request.probe_imds
-            && std::env::var_os("IDENTITY_ENDPOINT").is_none()
-            && std::env::var_os("MSI_ENDPOINT").is_none();
+        let discover_imds = request.probe_imds;
         if discover_imds
             && let Err(error) = self
                 .imds_available
-                .get_or_try_init(|| probe_imds(self.transport.clone().unwrap_or_default()))
+                .get_or_init(|| probe_imds(self.transport.clone().unwrap_or_default()))
                 .await
         {
-            return CredentialAttempt::Unavailable(error);
+            return CredentialAttempt::Unavailable(error.clone());
         }
         match self.acquire_token(request).await {
             Ok(credential) => CredentialAttempt::Resolved(credential),
@@ -674,6 +672,17 @@ mod tests {
     struct AvailableImdsClient {
         probe_status: StatusCode,
         response_status: Option<StatusCode>,
+        probes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Default for AvailableImdsClient {
+        fn default() -> Self {
+            Self {
+                probe_status: StatusCode::BadRequest,
+                response_status: None,
+                probes: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
     }
 
     impl HttpClient for AvailableImdsClient {
@@ -696,6 +705,8 @@ mod tests {
                     ))
                     .is_none()
                 {
+                    self.probes
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     return Ok(AsyncRawResponse::from_bytes(
                         self.probe_status,
                         Headers::new(),
@@ -736,6 +747,7 @@ mod tests {
             Transport::new(Arc::new(AvailableImdsClient {
                 probe_status: StatusCode::BadRequest,
                 response_status: None,
+                ..Default::default()
             })),
         );
         let request = ValidatedAzureRequest::new(NativeAzureRequest::ManagedIdentity {
@@ -758,13 +770,11 @@ mod tests {
     async fn unrelated_metadata_responses_do_not_start_managed_identity_acquisition(
         #[case] status: StatusCode,
     ) {
-        let acquirer = NativeAzureTokenAcquirer::with_transport(
-            4,
-            Transport::new(Arc::new(AvailableImdsClient {
-                probe_status: status,
-                response_status: None,
-            })),
-        );
+        let client = Arc::new(AvailableImdsClient {
+            probe_status: status,
+            ..Default::default()
+        });
+        let acquirer = NativeAzureTokenAcquirer::with_transport(4, Transport::new(client.clone()));
         let request = ValidatedAzureRequest::new(NativeAzureRequest::ManagedIdentity {
             client_id: None,
             scope: deployment("https://service.test/.default".into()),
@@ -772,10 +782,13 @@ mod tests {
         })
         .unwrap()
         .with_imds_probe(true);
-        assert!(matches!(
-            acquirer.acquire(request).await,
-            super::CredentialAttempt::Unavailable(_)
-        ));
+        for _ in 0..2 {
+            assert!(matches!(
+                acquirer.acquire(request.clone()).await,
+                super::CredentialAttempt::Unavailable(_)
+            ));
+        }
+        assert_eq!(client.probes.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[rstest::rstest]
@@ -794,6 +807,7 @@ mod tests {
             Transport::new(Arc::new(AvailableImdsClient {
                 probe_status: StatusCode::BadRequest,
                 response_status: Some(status),
+                ..Default::default()
             })),
         );
         let request = ValidatedAzureRequest::new(NativeAzureRequest::ManagedIdentity {

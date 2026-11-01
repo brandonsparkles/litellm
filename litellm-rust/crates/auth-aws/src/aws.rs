@@ -140,6 +140,7 @@ pub enum AwsAuthFlow {
     AssumeRole {
         role: String,
         session_name: Option<String>,
+        web_identity_role: Option<String>,
     },
     Profile {
         name: String,
@@ -185,6 +186,9 @@ pub fn classify_auth(
     config: AwsAuthConfig,
     env_lookup: &(dyn Fn(&str) -> Option<String> + Sync),
 ) -> AwsAuthFlow {
+    let web_identity_role = env_lookup(AWS_WEB_IDENTITY_TOKEN_FILE)
+        .filter(|token_file| !token_file.is_empty())
+        .and_then(|_| env_lookup(AWS_ROLE_ARN));
     let config = config.with_environment(env_lookup);
     if let (Some(token), Some(role), Some(session_name)) = (
         config.web_identity_token.clone(),
@@ -201,6 +205,7 @@ pub fn classify_auth(
         return AwsAuthFlow::AssumeRole {
             role,
             session_name: config.session_name.clone(),
+            web_identity_role,
         };
     }
     if let Some(name) = config.profile_name {
@@ -261,15 +266,34 @@ impl AwsAuthService {
         config: AwsAuthConfig,
         env_lookup: &(dyn Fn(&str) -> Option<String> + Sync),
     ) -> Result<Credentials, Error> {
-        let resolved = config.with_environment(env_lookup);
-        let flow = classify_auth(resolved.clone(), &|_| None);
-        let key = resolved.clone();
-        let credentials = self
-            .credentials
+        let resolved = config.clone().with_environment(env_lookup);
+        let flow = classify_auth(config, env_lookup);
+        let cached = self.cached_credentials(&resolved, &flow).await?;
+        if fresh(&cached) {
+            return Ok(cached);
+        }
+        self.credentials.invalidate(&resolved).await;
+        let refetched = self.cached_credentials(&resolved, &flow).await?;
+        if fresh(&refetched) {
+            return Ok(refetched);
+        }
+        self.credentials.invalidate(&resolved).await;
+        Err(Error::ExpiredCredentials)
+    }
+
+    async fn cached_credentials(
+        &self,
+        resolved: &AwsAuthConfig,
+        flow: &AwsAuthFlow,
+    ) -> Result<Credentials, Error> {
+        self.credentials
             .try_get_with(resolved.clone(), async {
                 let provider = self
                     .providers
-                    .try_get_with(resolved.clone(), self.loader.load(resolved, flow.clone()))
+                    .try_get_with(
+                        resolved.clone(),
+                        self.loader.load(resolved.clone(), flow.clone()),
+                    )
                     .await
                     .map_err(|error| (*error).clone())?;
                 provider
@@ -278,16 +302,14 @@ impl AwsAuthService {
                     .map_err(Error::credentials(flow.credential_flow()))
             })
             .await
-            .map_err(|error| (*error).clone())?;
-        if credentials
-            .expiry()
-            .is_some_and(|expiry| expiry <= SystemTime::now())
-        {
-            self.credentials.invalidate(&key).await;
-            return Err(Error::ExpiredCredentials);
-        }
-        Ok(credentials)
+            .map_err(|error| (*error).clone())
     }
+}
+
+fn fresh(credentials: &Credentials) -> bool {
+    credentials
+        .expiry()
+        .is_none_or(|expiry| expiry > SystemTime::now() + EXPIRY_BUFFER)
 }
 
 impl AwsAuthFlow {
@@ -348,8 +370,12 @@ async fn build_provider(
             };
             Ok(SharedCredentialsProvider::new(builder.build().await))
         }
-        AwsAuthFlow::AssumeRole { role, session_name } => {
-            if is_already_running_as_role(&role, &resolved).await? {
+        AwsAuthFlow::AssumeRole {
+            role,
+            session_name,
+            web_identity_role,
+        } => {
+            if is_already_running_as_role(&role, web_identity_role.as_deref(), &resolved).await? {
                 return Ok(SharedCredentialsProvider::new(
                     aws_config::default_provider::credentials::DefaultCredentialsChain::builder()
                         .build()
@@ -444,16 +470,16 @@ impl ProvideCredentials for WebIdentityProvider {
     }
 }
 
-async fn is_already_running_as_role(role: &str, config: &AwsAuthConfig) -> Result<bool, Error> {
+async fn is_already_running_as_role(
+    role: &str,
+    web_identity_role: Option<&str>,
+    config: &AwsAuthConfig,
+) -> Result<bool, Error> {
     if role_identity(role).is_none() {
         return Ok(false);
     }
-    if let (Ok(current_role), Ok(token_file)) = (
-        std::env::var(AWS_ROLE_ARN),
-        std::env::var(AWS_WEB_IDENTITY_TOKEN_FILE),
-    ) && !token_file.is_empty()
-    {
-        return Ok(same_role_arns(role, &current_role));
+    if let Some(current_role) = web_identity_role {
+        return Ok(same_role_arns(role, current_role));
     }
 
     let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
@@ -1035,6 +1061,28 @@ mod tests {
         );
     }
 
+    #[rstest::rstest]
+    #[case::running_with_web_identity("/var/run/token", Some("arn:aws:iam::1:role/current"))]
+    #[case::empty_token_file("", None)]
+    fn assume_role_reads_the_ambient_role_from_the_injected_environment(
+        #[case] token_file: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        let env = |key: &str| match key {
+            AWS_WEB_IDENTITY_TOKEN_FILE => Some(token_file.to_string()),
+            AWS_ROLE_ARN => Some("arn:aws:iam::1:role/current".to_string()),
+            _ => None,
+        };
+        let config = AwsAuthConfig {
+            role_name: Some("arn:aws:iam::1:role/target".into()),
+            ..Default::default()
+        };
+        let AwsAuthFlow::AssumeRole { web_identity_role, .. } = classify_auth(config, &env) else {
+            panic!("a role name selects AssumeRole");
+        };
+        assert_eq!(web_identity_role.as_deref(), expected);
+    }
+
     #[tokio::test]
     async fn static_credentials_do_not_use_network() {
         let credentials = AwsAuthService::default()
@@ -1056,7 +1104,8 @@ mod tests {
     struct CountingLoader {
         loads: Arc<std::sync::atomic::AtomicUsize>,
         calls: Arc<std::sync::atomic::AtomicUsize>,
-        first_lifetime: Duration,
+        short_lifetime: Duration,
+        short_calls: usize,
     }
 
     impl ProviderLoader for CountingLoader {
@@ -1064,7 +1113,8 @@ mod tests {
             let loads = self.loads.clone();
             let provider = CountingProvider {
                 calls: self.calls.clone(),
-                first_lifetime: self.first_lifetime,
+                short_lifetime: self.short_lifetime,
+                short_calls: self.short_calls,
                 key: config.access_key_id.unwrap(),
             };
             Box::pin(async move {
@@ -1077,7 +1127,8 @@ mod tests {
     #[derive(Debug)]
     struct CountingProvider {
         calls: Arc<std::sync::atomic::AtomicUsize>,
-        first_lifetime: Duration,
+        short_lifetime: Duration,
+        short_calls: usize,
         key: SecretValue,
     }
 
@@ -1091,8 +1142,8 @@ mod tests {
             aws_credential_types::provider::future::ProvideCredentials::new(async move {
                 tokio::task::yield_now().await;
                 let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let lifetime = if call == 0 {
-                    self.first_lifetime
+                let lifetime = if call < self.short_calls {
+                    self.short_lifetime
                 } else {
                     Duration::from_secs(3600)
                 };
@@ -1116,7 +1167,8 @@ mod tests {
         let auth = AwsAuthService::new(Arc::new(CountingLoader {
             loads: loads.clone(),
             calls: calls.clone(),
-            first_lifetime: Duration::from_secs(30),
+            short_lifetime: Duration::from_secs(30),
+            short_calls: 1,
         }));
         let config = AwsAuthConfig {
             access_key_id: Some("identity".into()),
@@ -1131,31 +1183,39 @@ mod tests {
             .resolve_credentials(config.clone(), &no_env)
             .await
             .unwrap();
-        let third = auth.resolve_credentials(config, &no_env).await.unwrap();
-        assert_ne!(first.session_token(), second.session_token());
-        assert_eq!(second.session_token(), third.session_token());
+        assert_eq!(first.session_token(), Some("session-1"));
+        assert_eq!(first.session_token(), second.session_token());
         assert_eq!(loads.load(Ordering::SeqCst), 1);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[rstest::rstest]
+    #[case::recovered_by_one_refetch(1, Some("session-1"))]
+    #[case::still_expired_after_refetch(2, None)]
     #[tokio::test]
-    async fn expired_credentials_fail_and_the_next_acquisition_recovers() {
-        use std::sync::atomic::AtomicUsize;
+    async fn expired_credentials_are_refetched_once(
+        #[case] short_calls: usize,
+        #[case] session: Option<&str>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
         let auth = AwsAuthService::new(Arc::new(CountingLoader {
             loads: Arc::new(AtomicUsize::new(0)),
-            calls: Arc::new(AtomicUsize::new(0)),
-            first_lifetime: Duration::ZERO,
+            calls: calls.clone(),
+            short_lifetime: Duration::ZERO,
+            short_calls,
         }));
         let config = AwsAuthConfig {
             access_key_id: Some("identity".into()),
             ..Default::default()
         };
-        assert!(matches!(
-            auth.resolve_credentials(config.clone(), &no_env).await,
-            Err(Error::ExpiredCredentials)
-        ));
-        assert!(auth.resolve_credentials(config, &no_env).await.is_ok());
+        let result = auth.resolve_credentials(config, &no_env).await;
+        assert_eq!(
+            result.as_ref().ok().and_then(Credentials::session_token),
+            session
+        );
+        assert!(session.is_some() || matches!(result, Err(Error::ExpiredCredentials)));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[rstest::rstest]
@@ -1167,7 +1227,8 @@ mod tests {
         let auth = AwsAuthService::new(Arc::new(CountingLoader {
             loads: loads.clone(),
             calls: calls.clone(),
-            first_lifetime: Duration::from_secs(3600),
+            short_lifetime: Duration::from_secs(3600),
+            short_calls: 0,
         }));
         let first = AwsAuthConfig {
             access_key_id: Some("first".into()),

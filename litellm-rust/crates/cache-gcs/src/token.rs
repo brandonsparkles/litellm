@@ -29,7 +29,7 @@ impl TokenSource for GcpTokenSource {
             self.auth
                 .access_token(match &self.credentials {
                     Some(path) => CredentialSource::Trusted(SecretValue::new(path.clone())),
-                    None => CredentialSource::from_environment(&|name| std::env::var(name).ok()),
+                    None => CredentialSource::application_default(&|name| std::env::var(name).ok()),
                 })
                 .await
                 .map(|token| token.expose().to_owned())

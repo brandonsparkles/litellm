@@ -147,13 +147,16 @@ pub enum CredentialSource {
 }
 
 impl CredentialSource {
-    pub fn from_environment(env_lookup: &dyn Fn(&str) -> Option<String>) -> Self {
-        if let Some(configured) = VertexParams::CREDENTIALS.resolve(&|_| None, env_lookup) {
-            return Self::Trusted(SecretValue::new(configured));
-        }
+    pub fn from_vertex_environment(env_lookup: &dyn Fn(&str) -> Option<String>) -> Self {
+        VertexParams::CREDENTIALS
+            .resolve(&|_| None, env_lookup)
+            .map(|configured| Self::Trusted(SecretValue::new(configured)))
+            .unwrap_or_else(|| Self::application_default(env_lookup))
+    }
+
+    pub fn application_default(env_lookup: &dyn Fn(&str) -> Option<String>) -> Self {
         non_empty_env(env_lookup, GOOGLE_APPLICATION_CREDENTIALS_ENV)
-            .map(Self::ApplicationCredentials)
-            .unwrap_or(Self::Adc)
+            .map_or(Self::Adc, Self::ApplicationCredentials)
     }
 }
 
@@ -169,7 +172,7 @@ pub(crate) fn credential_source(
             }
         };
     }
-    CredentialSource::from_environment(env_lookup)
+    CredentialSource::from_vertex_environment(env_lookup)
 }
 
 fn optional_credentials(
@@ -321,6 +324,22 @@ mod tests {
         );
         assert!(matches!(
             credential_source(&empty, &|_| None),
+            CredentialSource::Adc
+        ));
+    }
+
+    #[rstest::rstest]
+    fn application_default_ignores_vertex_credentials() {
+        let env = |name: &str| match name {
+            VERTEXAI_CREDENTIALS_ENV => Some("environment-json".to_string()),
+            GOOGLE_APPLICATION_CREDENTIALS_ENV => Some("adc.json".to_string()),
+            _ => None,
+        };
+        assert!(
+            matches!(CredentialSource::application_default(&env), CredentialSource::ApplicationCredentials(path) if path == "adc.json")
+        );
+        assert!(matches!(
+            CredentialSource::application_default(&|name| (name == VERTEXAI_CREDENTIALS_ENV).then(|| "environment-json".into())),
             CredentialSource::Adc
         ));
     }

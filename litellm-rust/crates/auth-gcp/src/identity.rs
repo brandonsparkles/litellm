@@ -110,12 +110,13 @@ impl GcpTokenSource for SdkTokenSource {
 fn load_application_credentials(path: &str) -> Result<Arc<dyn GcpTokenSource>, Error> {
     let contents = std::fs::read_to_string(path).map_err(auth_acquisition_error)?;
     let configured: Value = serde_json::from_str(&contents).map_err(auth_acquisition_error)?;
-    let project_id = configured
-        .get("project_id")
-        .or_else(|| configured.get("quota_project_id"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
     let kind = configured.get("type").and_then(Value::as_str);
+    let project_id = match kind {
+        Some("authorized_user") => configured.get("quota_project_id"),
+        _ => configured.get("project_id"),
+    }
+    .and_then(Value::as_str)
+    .map(str::to_string);
     let credentials = match kind {
         Some("authorized_user") => {
             google_cloud_auth::credentials::user_account::Builder::new(configured)
@@ -318,7 +319,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(provider.project_id().await.unwrap(), "quota-project");
+        assert_eq!(
+            provider.project_id().await.ok().as_deref(),
+            (kind == "authorized_user").then_some("quota-project")
+        );
         let original = provider.token().await.unwrap();
         tokio::time::pause();
         tokio::time::advance(std::time::Duration::from_secs(3601)).await;
