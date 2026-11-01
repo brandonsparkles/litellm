@@ -135,7 +135,10 @@ class _DeprecatedAttribute(Generic[_T]):
 
     def __set__(self, obj: "DeprecatedRouterMembers", value: _T) -> None:
         _note(self.name, self.replacement)
-        if self.name in SETTING_FIELDS or self.name in ASSIGNABLE_ALIASES:
+        if self.name == "model_list":
+            # A whole new list is reindexed, so a replaced id never finds the new list's entries.
+            _as_router(obj)._assign_model_list(value)  # pyright: ignore[reportArgumentType]  # the assigned list
+        elif self.name in SETTING_FIELDS or self.name in ASSIGNABLE_ALIASES:
             _as_router(obj).apply(ChangeSet(assign={self.name: value}))
         else:
             setattr(obj, "_core_" + self.name, value)

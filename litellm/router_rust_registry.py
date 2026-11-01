@@ -66,6 +66,7 @@ from litellm.llms.openai_like.json_loader import JSONProviderRegistry
 from litellm.llms.openai_like.model_info import MODEL_INFO_REFRESH_SECONDS
 from litellm.responses.bridge_check import keep_registered_mode
 from litellm.router_api import RouterRegistry, deployment_id
+from litellm.router_core import organization_deployment_id
 from litellm.router_rust_model_info import HostModelInfo
 from litellm.router_rust_shaping import ROUTER_CLIENTS_TARGET
 from litellm.router_strategy.auto_router.auto_router_model_naming import classify_strategy_router_model
@@ -622,6 +623,10 @@ class HostRegistry(HostModelInfo):
             self._core_team_model_to_deployment_indices = {}
         self._core_team_pattern_routers = {}
         self._core_team_public_model_names = frozenset()
+        # The replaced list's wildcard routes and names go with it.
+        self._core_pattern_router = PatternMatchRouter()
+        self._core_provider_default_deployment_ids.clear()
+        self._core_deployment_names.clear()
         if self.strategies is not None:
             self.strategies.reset()
         self._provider_unresolved_deployments = ()
@@ -656,10 +661,27 @@ class HostRegistry(HostModelInfo):
             if "id" not in info_dict:
                 info_dict["id"] = deployment_id(str(model_name), litellm_params)
             organization = litellm_params.get("organization")
-            organizations: Sequence[object] = organization if isinstance(organization, list) else (None,)
-            for org in organizations:
-                if org is not None:
+            if isinstance(organization, list):
+                # Each organization's deployment has its own id (``organization_deployment_id``).
+                for position, org in enumerate(tuple(organization)):  # pyright: ignore[reportUnknownArgumentType, reportUnknownVariableType]  # configured organizations
                     litellm_params["organization"] = org
+                    self._create_deployment(
+                        model,
+                        str(model_name),
+                        litellm_params,
+                        {
+                            **info_dict,
+                            "id": organization_deployment_id(
+                                declared_id,
+                                position,
+                                org,
+                                lambda: deployment_id(str(model_name), litellm_params),
+                            ),
+                        },
+                        declared_id=declared_id,
+                        duplicate_ids=duplicate_ids,
+                    )
+            else:
                 self._create_deployment(
                     model,
                     str(model_name),
@@ -855,6 +877,31 @@ class HostRegistry(HostModelInfo):
             vertex_credentials=credentials,  # pyright: ignore[reportArgumentType]  # the configured credentials
         )
 
+    def assign_model_list(self, model_list: Sequence[object]) -> None:
+        """``router.model_list = [...]`` (deprecated, ``_assign_model_list``): the list is swapped as
+        given and reindexed, and the registry version moves once."""
+        entries: Final = [_LITELLM_PARAMS_ADAPTER.validate_python(entry) for entry in model_list]
+        with self._deployment_index_lock:
+            self._core_model_list = model_list  # pyright: ignore[reportAttributeAccessIssue]  # the list as assigned, as the core keeps it
+            self.model_id_to_deployment_index_map = {
+                str(model_id): idx
+                for idx, entry in enumerate(entries)
+                if (model_id := _model_info_of(entry).get("id")) is not None
+            }
+            self._core_model_name_to_deployment_indices = {}
+            self._core_team_model_to_deployment_indices = {}
+            self._core_team_public_model_names = frozenset()
+            for idx, entry in enumerate(entries):
+                model_name = entry.get("model_name")
+                if model_name:
+                    self._core_model_name_to_deployment_indices.setdefault(str(model_name), []).append(idx)
+                self._update_team_model_index(entry, idx)
+            self._core_model_names = {str(entry["model_name"]) for entry in entries if entry.get("model_name")}
+            self._access_groups_cache = None
+            self._invalidate_model_group_info_cache()
+            self._registry_version += 1
+        self._on_change()
+
     def _update_team_model_index(self, model: Mapping[str, object], idx: int) -> None:
         info: Final = _model_info_of(model)
         team_id: Final = info.get("team_id")
@@ -905,6 +952,8 @@ class HostRegistry(HostModelInfo):
             public_model_name for _, public_model_name in self._core_team_model_to_deployment_indices
         )
         self._core_pattern_router.remove_deployment(model_id)
+        if model_id in self._core_provider_default_deployment_ids:
+            self._core_provider_default_deployment_ids.remove(model_id)
         for team_id in list(self._core_team_pattern_routers):
             team_router = self._core_team_pattern_routers[team_id]
             team_router.remove_deployment(model_id)
@@ -962,6 +1011,8 @@ class HostRegistry(HostModelInfo):
                 self.strategies.upserted(deployment, on_router)
         except Exception as e:
             if not self.ignore_invalid_deployments:
+                # The failed edit raises, but the deployment it replaced keeps serving.
+                self._restore_deployment_after_failed_upsert(on_router, model_id)
                 raise
             verbose_router_logger.warning(
                 "Error upserting deployment %s (id=%s): %s. Dropping it and continuing with other deployments.",

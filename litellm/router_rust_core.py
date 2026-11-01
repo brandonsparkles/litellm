@@ -62,6 +62,7 @@ from litellm.router_api import (
 )
 from litellm.router_attempt import for_requested_model, request_from_call
 from litellm.router_config import RouterConfig, RouterDynamicConfig
+from litellm.router_core import detached_request
 from litellm.router_python_host import PythonHost
 from litellm.router_rust_access import caller_fields, selection_refusal
 from litellm.router_rust_alerting import initialize_alerting
@@ -467,8 +468,8 @@ class Resolved:
     @classmethod
     def of(cls, config: RouterConfig, dynamic: RouterDynamicConfig) -> "Resolved":
         get: Final = config.get
-        # The process list is the router's own, as in the Python router: default_fallbacks are
-        # appended to it in place.
+        # The process list is the router's own, as in the Python router; default_fallbacks extend
+        # a new list, never the process-wide ``litellm.fallbacks``.
         configured: Final[list[object] | None] = (  # mutable-ok: the router's live list, as Python keeps it
             list(_as_list(get("fallbacks"))) or (dynamic.fallbacks if dynamic.fallbacks else None)  # pyright: ignore[reportAssignmentType]  # the process list as given
         )
@@ -478,10 +479,10 @@ class Resolved:
             raise TypeError(
                 f"default_fallbacks must be a list of model names, got '{default_fallbacks}'. Use ['{default_fallbacks}']"
             )
-        if default_fallbacks is not None and configured is not None:
-            configured.append({"*": default_fallbacks})
         fallbacks: Final[list[object] | None] = (  # mutable-ok: see above
-            [{"*": default_fallbacks}] if default_fallbacks is not None and configured is None else configured
+            configured
+            if default_fallbacks is None
+            else [*(configured if configured is not None else ()), {"*": default_fallbacks}]
         )
         content_policy: Final = list(_as_list(get("content_policy_fallbacks"))) or (
             list(dynamic.content_policy_fallbacks) if dynamic.content_policy_fallbacks else None
@@ -1331,10 +1332,9 @@ class RustCore(
         self._checks.prompt_caching_pin_cache.in_memory_cache.flush_cache()
 
     def reset(self) -> None:
-        """Empty the host's success and failure callback lists (every entry, not only this core's),
-        drop the retry policy and flush the caches."""
-        for name in ("success_callback", "_async_success_callback", "failure_callback", "_async_failure_callback"):
-            self._host.set_callback_list(name, [])
+        """Drop this core's own entries from the host's success and failure callback lists (other
+        code's callbacks stay), drop the retry policy and flush the caches."""
+        self._release_outcome_callbacks()
         self._plain["retry_policy"] = None
         self._set_retry_policies({"retry_policy": None})
         self.flush_cache()
@@ -1359,6 +1359,11 @@ class RustCore(
         if name in PLAIN_SETTING_ATTRIBUTES or name in SETTING_FIELDS or name in ASSIGNABLE_ALIASES:
             _ = self.apply(ChangeSet(assign={name: value}))
         elif name == "model_list":
+            from litellm.router_deprecated import (
+                _note,  # pyright: ignore[reportPrivateUsage]  # the deprecated write notes its use like Python's
+            )
+
+            _note("model_list", "registry().all()")
             self._assign_model_list(_as_list(value))
         else:
             object.__setattr__(self, name, value)
@@ -1377,7 +1382,30 @@ class RustCore(
     ) -> Mapping[str, object] | Sequence[Mapping[str, object]]:
         """Pick a deployment for ``model`` without calling it (``pick``), list the deployments a
         pick would choose among (``healthy``), or pick one for a pass-through route
-        (``pass_through``, which picks with the sync strategies, as Python does)."""
+        (``pass_through``, which picks with the sync strategies, as Python does). The caller's
+        ``request_kwargs`` are left unchanged: selection works on a copy."""
+        return await self._select_in_place(
+            model,
+            None if request_kwargs is None else detached_request(request_kwargs),
+            kind=kind,
+            specific_deployment=specific_deployment,
+            messages=messages,
+            input=input,
+            health_check_probe=health_check_probe,
+        )
+
+    async def _select_in_place(
+        self,
+        model: str,
+        request_kwargs: dict[str, object] | None = None,  # mutable-ok: pinned and stamped in place
+        *,
+        kind: str = "pick",
+        specific_deployment: bool | None = None,
+        messages: object = None,
+        input: object = None,
+        health_check_probe: bool = False,
+    ) -> Mapping[str, object] | Sequence[Mapping[str, object]]:
+        """``select`` on the request the core itself routes, which keeps what selection pins on it."""
         if kind not in ("pick", "healthy", "pass_through"):
             raise ValueError(f"unknown select kind {kind!r}")
         request: Final = request_kwargs if request_kwargs is not None else {}
