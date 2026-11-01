@@ -611,6 +611,7 @@ async fn a_host_endpoint_connects_to_its_database() {
         port,
         tls: None,
         db: 3,
+        unix_socket_path: None,
     }))
     .unwrap();
     let in_db_0 = connect(url(server.url().to_owned())).unwrap();

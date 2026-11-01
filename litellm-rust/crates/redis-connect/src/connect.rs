@@ -23,6 +23,9 @@ pub struct HostServices {
 }
 
 pub fn connect(resolved: ResolvedRedis, host: HostServices) -> Result<RedisClient, Error> {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
     tracing::info!(endpoint = ?resolved.endpoint, namespace = ?resolved.namespace, "redis client configured");
     let credentials = credentials(resolved.auth, &host)?;
     let events = host.events;

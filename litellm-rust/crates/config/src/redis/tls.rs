@@ -8,6 +8,8 @@ use crate::Value;
 const URL_TLS_SETTINGS: &[&str] = &[
     "ssl_cert_reqs",
     "ssl_ca_certs",
+    "ssl_ca_data",
+    "ssl_ca_path",
     "ssl_certfile",
     "ssl_keyfile",
     "ssl_check_hostname",
@@ -35,6 +37,8 @@ pub(super) fn tls_options(
             .map(Into::into),
         certfile: text_value(merged, "ssl_certfile").map(Into::into),
         keyfile: text_value(merged, "ssl_keyfile").map(Into::into),
+        ca_data: text_value(merged, "ssl_ca_data"),
+        ca_path: text_value(merged, "ssl_ca_path").map(Into::into),
         verify_certificate,
         check_hostname: bool_value(merged, "ssl_check_hostname"),
     })

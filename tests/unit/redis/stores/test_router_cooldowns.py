@@ -148,7 +148,7 @@ def test_the_wire_fixture_is_what_mains_codec_writes_and_reads() -> None:
 
 @pytest.mark.parametrize(
     "setting",
-    ({"ssl_ciphers": "HIGH"}, {"unix_socket_path": "/tmp/redis.sock"}, {"credential_provider": object()}),
+    ({"ssl_ciphers": "HIGH"}, {"ssl": True, "ssl_validate_ocsp": True}, {"credential_provider": object()}),
 )
 def test_a_redis_setting_the_native_client_cannot_honor_never_fails_construction(
     setting: dict[str, object], caplog: pytest.LogCaptureFixture

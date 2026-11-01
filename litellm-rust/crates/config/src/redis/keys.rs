@@ -135,8 +135,8 @@ pub(super) const SETTINGS: &[Setting] = &[
     Setting::new("socket_timeout", Handling::Read, true, &[]),
     Setting::new("ssl", Handling::Read, true, &[]),
     Setting::new("ssl_ca_certs", Handling::Read, true, &[]),
-    Setting::new("ssl_ca_data", Handling::Warn, true, &[]),
-    Setting::new("ssl_ca_path", Handling::Warn, true, &[]),
+    Setting::new("ssl_ca_data", Handling::Read, true, &[]),
+    Setting::new("ssl_ca_path", Handling::Read, true, &[]),
     Setting::new("ssl_cert_reqs", Handling::Read, true, &[]),
     Setting::new("ssl_certfile", Handling::Read, true, &[]),
     Setting::new("ssl_check_hostname", Handling::Read, true, &[]),
@@ -154,7 +154,7 @@ pub(super) const SETTINGS: &[Setting] = &[
         false,
         &["REDIS_CLUSTER_NODES"],
     ),
-    Setting::new("unix_socket_path", Handling::Warn, true, &[]),
+    Setting::new("unix_socket_path", Handling::Read, true, &[]),
     Setting::new("url", Handling::Read, true, &[]),
     Setting::new("username", Handling::Read, true, &[]),
 ];
@@ -163,17 +163,11 @@ pub(super) const SETTINGS: &[Setting] = &[
 /// rather than only the key name.
 pub(super) fn consequence(kwarg: &str) -> &'static str {
     match kwarg {
-        "unix_socket_path" => {
-            "the Rust client connects over TCP to host:port instead of the socket"
-        }
         "ssl_validate_ocsp"
         | "ssl_validate_ocsp_stapled"
         | "ssl_ocsp_context"
         | "ssl_ocsp_expected_cert" => {
             "rustls has no client-side OCSP, so the connection is made without revocation checks"
-        }
-        "ssl_ca_data" | "ssl_ca_path" => {
-            "the system trust store is used instead of the configured CA"
         }
         "ssl_ciphers" | "ssl_min_version" => {
             "rustls negotiates TLS 1.2+ with its own ECDHE AEAD suites"

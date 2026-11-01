@@ -1970,6 +1970,8 @@ def _resolved_tls(connection_class: type, kwargs: Mapping[str, object]) -> dict[
         return None
     return {
         "ca_certs": kwargs.get("ssl_ca_certs"),
+        "ca_data": kwargs.get("ssl_ca_data"),
+        "ca_path": kwargs.get("ssl_ca_path"),
         "certfile": kwargs.get("ssl_certfile"),
         "keyfile": kwargs.get("ssl_keyfile"),
         "verify_certificate": kwargs.get("ssl_cert_reqs", "required") != "none",
@@ -2118,6 +2120,8 @@ def _resolve_like_the_rust_resolver(
                 "socket_timeout": 1.5,
                 "tls": {
                     "ca_certs": None,
+                    "ca_data": None,
+                    "ca_path": None,
                     "certfile": None,
                     "keyfile": None,
                     "check_hostname": False,
@@ -2144,6 +2148,8 @@ def _resolve_like_the_rust_resolver(
                 "socket_timeout": 5.0,
                 "tls": {
                     "ca_certs": None,
+                    "ca_data": None,
+                    "ca_path": None,
                     "certfile": None,
                     "keyfile": None,
                     "check_hostname": False,
@@ -2233,6 +2239,8 @@ def _resolve_like_the_rust_resolver(
                 "socket_timeout": 5.0,
                 "tls": {
                     "ca_certs": None,
+                    "ca_data": None,
+                    "ca_path": None,
                     "certfile": None,
                     "keyfile": None,
                     "check_hostname": False,
@@ -2257,6 +2265,8 @@ def _resolve_like_the_rust_resolver(
                 "socket_timeout": 5.0,
                 "tls": {
                     "ca_certs": None,
+                    "ca_data": None,
+                    "ca_path": None,
                     "certfile": None,
                     "keyfile": None,
                     "check_hostname": False,
@@ -2312,6 +2322,8 @@ def _resolve_like_the_rust_resolver(
                 "socket_timeout": 5.0,
                 "tls": {
                     "ca_certs": "/ca.pem",
+                    "ca_data": None,
+                    "ca_path": None,
                     "certfile": None,
                     "keyfile": None,
                     "check_hostname": True,
@@ -2438,6 +2450,8 @@ def _resolve_like_the_rust_resolver(
                 "socket_timeout": 5.0,
                 "tls": {
                     "ca_certs": "/gcp-ca.pem",
+                    "ca_data": None,
+                    "ca_path": None,
                     "certfile": None,
                     "keyfile": None,
                     "check_hostname": False,
@@ -2537,6 +2551,8 @@ def _resolve_like_the_rust_resolver(
                 "socket_timeout": 5.0,
                 "tls": {
                     "ca_certs": None,
+                    "ca_data": None,
+                    "ca_path": None,
                     "certfile": None,
                     "keyfile": None,
                     "check_hostname": False,
@@ -2570,6 +2586,8 @@ def _resolve_like_the_rust_resolver(
                 "socket_timeout": 5.0,
                 "tls": {
                     "ca_certs": None,
+                    "ca_data": None,
+                    "ca_path": None,
                     "certfile": None,
                     "keyfile": None,
                     "check_hostname": False,
@@ -2601,6 +2619,8 @@ def _resolve_like_the_rust_resolver(
                 "socket_timeout": 5.0,
                 "tls": {
                     "ca_certs": None,
+                    "ca_data": None,
+                    "ca_path": None,
                     "certfile": None,
                     "keyfile": None,
                     "check_hostname": False,
@@ -2653,6 +2673,8 @@ def _resolve_like_the_rust_resolver(
                 "socket_timeout": 5.0,
                 "tls": {
                     "ca_certs": "/ca.pem",
+                    "ca_data": None,
+                    "ca_path": None,
                     "certfile": None,
                     "keyfile": None,
                     "check_hostname": True,
@@ -2674,6 +2696,8 @@ def _resolve_like_the_rust_resolver(
                 "socket_timeout": 5.0,
                 "tls": {
                     "ca_certs": "/env-ca.pem",
+                    "ca_data": None,
+                    "ca_path": None,
                     "certfile": None,
                     "keyfile": None,
                     "check_hostname": False,
@@ -2731,6 +2755,8 @@ def _resolve_like_the_rust_resolver(
                 "socket_timeout": 5.0,
                 "tls": {
                     "ca_certs": None,
+                    "ca_data": None,
+                    "ca_path": None,
                     "certfile": None,
                     "keyfile": None,
                     "check_hostname": False,
@@ -2869,6 +2895,8 @@ def _resolve_like_the_rust_resolver(
                 "socket_timeout": 5.0,
                 "tls": {
                     "ca_certs": None,
+                    "ca_data": None,
+                    "ca_path": None,
                     "certfile": "/client.pem",
                     "keyfile": "/client.key",
                     "check_hostname": False,
@@ -2887,6 +2915,8 @@ def _resolve_like_the_rust_resolver(
                 "socket_timeout": 5.0,
                 "tls": {
                     "ca_certs": "/ca.pem",
+                    "ca_data": None,
+                    "ca_path": None,
                     "certfile": None,
                     "keyfile": None,
                     "check_hostname": True,
@@ -2906,6 +2936,8 @@ def _resolve_like_the_rust_resolver(
                 "socket_timeout": 5.0,
                 "tls": {
                     "ca_certs": None,
+                    "ca_data": None,
+                    "ca_path": None,
                     "certfile": None,
                     "keyfile": None,
                     "check_hostname": False,
@@ -2920,6 +2952,57 @@ def _resolve_like_the_rust_resolver(
             {},
             None,
             id="a_cluster_rejects_a_nonzero_db",
+        ),
+        pytest.param(
+            {
+                "host": "redis",
+                "ssl": True,
+                "ssl_ca_data": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----",
+            },
+            {},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "db": 0,
+                "host": "redis",
+                "mode": "host",
+                "port": 6379,
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+                "tls": {
+                    "ca_certs": None,
+                    "ca_data": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----",
+                    "ca_path": None,
+                    "certfile": None,
+                    "keyfile": None,
+                    "check_hostname": False,
+                    "verify_certificate": True,
+                },
+            },
+            id="ssl_ca_data",
+        ),
+        pytest.param(
+            {"host": "redis"},
+            {"REDIS_SSL": "True", "REDIS_SSL_CA_PATH": "/etc/ssl/private-cas"},
+            None,
+            id="ssl_ca_path_from_the_environment",
+        ),
+        pytest.param(
+            {"host": "redis", "ssl": True, "ssl_ca_certs": "/ca.pem", "unix_socket_path": "/tmp/redis.sock"},
+            {},
+            {
+                "auth": {"kind": "static", "password": None, "username": None},
+                "mode": "unix",
+                "path": "/tmp/redis.sock",
+                "socket_connect_timeout": None,
+                "socket_timeout": 5.0,
+            },
+            id="unix_socket_path_keeps_tls_settings_out_of_the_target",
+        ),
+        pytest.param(
+            {"unix_socket_path": "/tmp/redis.sock"},
+            {},
+            None,
+            id="unix_socket_path_without_a_host_fails_like_python",
         ),
     ),
 )

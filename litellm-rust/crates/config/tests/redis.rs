@@ -185,11 +185,6 @@ fn resolves_redis_through_the_parsed_config(
     &[],
     "connection_pool"
 )]
-#[case::unix_socket_path(
-    "general_settings:\n  coordination_redis:\n    host: redis\n    unix_socket_path: /tmp/redis.sock",
-    &[],
-    "unix_socket_path"
-)]
 fn unsupported_settings_resolve_with_a_warning_naming_their_source(
     #[case] yaml: &str,
     #[case] environment: &[(&str, &str)],
@@ -207,6 +202,7 @@ fn unsupported_settings_resolve_with_a_warning_naming_their_source(
             port: 6379,
             db: 0,
             tls: None,
+            unix_socket_path: None,
         })
     );
     assert!(
@@ -328,22 +324,22 @@ fn incomplete_aws_iam_auth_fails(#[case] yaml: &str, #[case] message: &str) {
 #[case::defaults_verify_the_certificate_but_not_the_hostname(
     "    ssl: true",
     &[],
-    Some(TlsOptions { ca_certs: None, certfile: None, keyfile: None, verify_certificate: true, check_hostname: false })
+    Some(TlsOptions { ca_certs: None, ca_data: None, ca_path: None, certfile: None, keyfile: None, verify_certificate: true, check_hostname: false })
 )]
 #[case::every_option(
     "    ssl: true\n    ssl_ca_certs: /ca.pem\n    ssl_certfile: /client.pem\n    ssl_keyfile: /client.key\n    ssl_cert_reqs: none\n    ssl_check_hostname: true",
     &[],
-    Some(TlsOptions { ca_certs: Some("/ca.pem".into()), certfile: Some("/client.pem".into()), keyfile: Some("/client.key".into()), verify_certificate: false, check_hostname: true })
+    Some(TlsOptions { ca_certs: Some("/ca.pem".into()), ca_data: None, ca_path: None, certfile: Some("/client.pem".into()), keyfile: Some("/client.key".into()), verify_certificate: false, check_hostname: true })
 )]
 #[case::options_from_the_environment(
     "    ssl: true",
     &[("REDIS_SSL_CA_CERTS", "/env-ca.pem"), ("REDIS_SSL_CERT_REQS", "optional")],
-    Some(TlsOptions { ca_certs: Some("/env-ca.pem".into()), certfile: None, keyfile: None, verify_certificate: true, check_hostname: false })
+    Some(TlsOptions { ca_certs: Some("/env-ca.pem".into()), ca_data: None, ca_path: None, certfile: None, keyfile: None, verify_certificate: true, check_hostname: false })
 )]
 #[case::gcp_ca_certs_replace_the_configured_ones(
     "    ssl: true\n    ssl_ca_certs: /ca.pem\n    gcp_service_account: account\n    gcp_ssl_ca_certs: /gcp-ca.pem",
     &[],
-    Some(TlsOptions { ca_certs: Some("/gcp-ca.pem".into()), certfile: None, keyfile: None, verify_certificate: true, check_hostname: false })
+    Some(TlsOptions { ca_certs: Some("/gcp-ca.pem".into()), ca_data: None, ca_path: None, certfile: None, keyfile: None, verify_certificate: true, check_hostname: false })
 )]
 #[case::options_without_ssl_stay_plaintext("    ssl_ca_certs: /ca.pem", &[], None)]
 fn tls_options_resolve_like_redis_py(

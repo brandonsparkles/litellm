@@ -238,6 +238,7 @@ impl RedisSettings {
                     port: integer(&merged, "port")?.unwrap_or(6379),
                     tls: tls()?,
                     db: db()?,
+                    unix_socket_path: text_value(&merged, "unix_socket_path").map(Into::into),
                 }),
             },
         };
