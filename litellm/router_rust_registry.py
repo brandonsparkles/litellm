@@ -877,6 +877,11 @@ class HostRegistry(HostModelInfo):
             vertex_credentials=credentials,  # pyright: ignore[reportArgumentType]  # the configured credentials
         )
 
+    def served_deployments(self) -> list[UntypedEntry]:  # mutable-ok: a fresh list for the Rust handle
+        """The deployments the Rust handle routes over: every entry with an id. Only
+        ``router.model_list = [...]`` keeps an entry without one, and that entry is never served."""
+        return [entry for entry in self._core_model_list if _model_info_of(entry).get("id") is not None]
+
     def assign_model_list(self, model_list: Sequence[object]) -> None:
         """``router.model_list = [...]`` (deprecated, ``_assign_model_list``): the list is swapped as
         given and reindexed, and the registry version moves once."""
