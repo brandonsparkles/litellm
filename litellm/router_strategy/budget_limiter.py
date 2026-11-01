@@ -564,10 +564,10 @@ class RouterBudgetLimiting(CustomLogger):
     async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
         """Original method now uses helper functions"""
         verbose_router_logger.debug("in RouterBudgetLimiting.async_log_success_event")
-        self._start_background_work()
         callback_fields: Final = _CALLBACK_FIELDS.validate_python(kwargs)
         if callback_fields.get("call_type") == "_arealtime":
             return
+        self._start_background_work()
         standard_logging_payload: Final[StandardLoggingPayload | None] = kwargs.get("standard_logging_object", None)
         if standard_logging_payload is None:
             raise ValueError("standard_logging_payload is required")
