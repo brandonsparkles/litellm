@@ -313,8 +313,8 @@ class LowestCostLoggingHandler(CustomLogger):
             verbose_router_logger.debug(
                 "item_cost: %s, item_tpm: %s, item_rpm: %s, model_id: %s",
                 item_cost,
-                item_tpm,
-                item_rpm,
+                item_tpm,  # pyright: ignore[reportUnknownArgumentType]  # the untyped cached usage map
+                item_rpm,  # pyright: ignore[reportUnknownArgumentType]  # the untyped cached usage map
                 _deployment.get("model_info", {}).get("id"),
             )
 

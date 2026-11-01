@@ -583,7 +583,7 @@ class LowestTPMLoggingHandler_v2(BaseRoutingStrategy, CustomLogger):
         )
 
         if deployment is None:
-            raise self._no_deployments_available_error(model_group, healthy_deployments, tpm_values, rpm_values)
+            raise self._no_deployments_available_error(model_group, healthy_deployments, tpm_values, rpm_values)  # pyright: ignore[reportUnknownArgumentType]  # the untyped cached usage lists
         return deployment
 
     @with_service_target("router_usage")
@@ -640,5 +640,5 @@ class LowestTPMLoggingHandler_v2(BaseRoutingStrategy, CustomLogger):
         )
 
         if deployment is None:
-            raise self._no_deployments_available_error(model_group, healthy_deployments, tpm_values, rpm_values)
+            raise self._no_deployments_available_error(model_group, healthy_deployments, tpm_values, rpm_values)  # pyright: ignore[reportUnknownArgumentType]  # the untyped cached usage lists
         return deployment

@@ -4784,9 +4784,9 @@ class PythonCore(DeprecatedRouterMembers):
                             "stream_with_fallbacks: error closing model_response: %s",
                             close_err,
                         )
-                if fallback_response is not None and hasattr(fallback_response, "close"):
+                if fallback_response is not None and hasattr(fallback_response, "close"):  # pyright: ignore[reportUnknownArgumentType]  # the legacy untyped router core
                     try:
-                        fallback_response.close()
+                        fallback_response.close()  # pyright: ignore[reportAttributeAccessIssue]  # a stream wrapper, closed when it has close()
                     except BaseException as close_err:
                         verbose_router_logger.debug(
                             "stream_with_fallbacks: error closing fallback_response: %s",
@@ -5984,10 +5984,10 @@ class PythonCore(DeprecatedRouterMembers):
                 }
             )
             self.success_calls[model_name] += 1
-            verbose_router_logger.info("litellm.image_generation(model=%s)\x1b[32m 200 OK\x1b[0m", model_name)
+            verbose_router_logger.info("litellm.image_generation(model=%s)\x1b[32m 200 OK\x1b[0m", model_name)  # pyright: ignore[reportUnknownArgumentType]  # the legacy untyped router core
             return response
         except Exception as e:
-            verbose_router_logger.info("litellm.image_generation(model=%s)\x1b[31m Exception %s\x1b[0m", model_name, e)
+            verbose_router_logger.info("litellm.image_generation(model=%s)\x1b[31m Exception %s\x1b[0m", model_name, e)  # pyright: ignore[reportUnknownArgumentType]  # the legacy untyped router core
             if model_name is not None:
                 self.fail_calls[model_name] += 1
             self._stamp_retry_skip_deployment_id(e, kwargs)
@@ -7530,7 +7530,7 @@ class PythonCore(DeprecatedRouterMembers):
             # For passthrough routes, use the actual model from deployment
             # and swap model name in endpoint if present
             self._add_deployment_model_to_endpoint_for_llm_passthrough_route(
-                kwargs=kwargs,
+                kwargs=kwargs,  # pyright: ignore[reportUnknownArgumentType]  # the legacy untyped router core
                 model=model,
                 model_name=model_name,  # pyright: ignore[reportUnknownArgumentType]  # the legacy untyped router core
             )
