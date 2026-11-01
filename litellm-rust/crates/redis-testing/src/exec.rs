@@ -23,7 +23,7 @@ pub(crate) async fn run<I: Image>(
 }
 
 pub(crate) fn cli(port: u16, args: &[&str]) -> Vec<String> {
-    ["redis-cli", "-p", &port.to_string()]
+    ["redis-cli", "-e", "-p", &port.to_string()]
         .into_iter()
         .chain(args.iter().copied())
         .map(str::to_owned)

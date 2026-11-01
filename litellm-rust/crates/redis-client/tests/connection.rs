@@ -18,21 +18,24 @@ async fn a_rejected_password_is_a_transport_failure() {
         .await
         .unwrap();
     let port = server.url().rsplit(':').next().unwrap().parse().unwrap();
-    let client = connect_to(
-        Endpoint::Host(HostEndpoint {
-            host: "127.0.0.1".to_owned(),
-            port,
-            username: None,
-            password: Some(SecretValue::new("wrong")),
-            tls: false,
-            db: 0,
-        }),
-        "",
-        Duration::from_secs(2),
-        None,
-    );
+    let with_password = |password: &str| {
+        connect_to(
+            Endpoint::Host(HostEndpoint {
+                host: "127.0.0.1".to_owned(),
+                port,
+                username: None,
+                password: Some(SecretValue::new(password)),
+                tls: false,
+                db: 0,
+            }),
+            "",
+            Duration::from_secs(2),
+            None,
+        )
+    };
+    with_password("right").ping().await.unwrap();
 
-    let rejected = client.ping().await;
+    let rejected = with_password("wrong").ping().await;
 
     assert!(matches!(rejected, Err(Error::Transport(_))), "{rejected:?}");
 }

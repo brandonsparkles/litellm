@@ -35,13 +35,18 @@ impl Connection {
             .set_connection_timeout(Some(timeouts.connect))
             .set_response_timeout(Some(timeouts.response))
             .set_number_of_retries(RECONNECT_RETRIES);
+        let info = info.set_tcp_settings(TcpSettings::default().set_nodelay(true));
         let manager = ConnectionManager::new_lazy_with_config(redis::Client::open(info)?, config)?;
         Ok(Self::Standalone(manager))
     }
 
     pub(crate) fn cluster(endpoint: &ClusterEndpoint, timeouts: Timeouts) -> RedisResult<Self> {
         let builder = ClusterClientBuilder::new(endpoint.addrs())
-            .tcp_settings(TcpSettings::default().set_keepalive(socket2::TcpKeepalive::new()))
+            .tcp_settings(
+                TcpSettings::default()
+                    .set_nodelay(true)
+                    .set_keepalive(socket2::TcpKeepalive::new()),
+            )
             .connection_timeout(timeouts.connect)
             .response_timeout(timeouts.response)
             .retries(CLUSTER_RETRIES)
@@ -56,9 +61,9 @@ impl Connection {
             Some(password) => builder.password(password.expose()),
             None => builder,
         };
-        let config = ClusterConfig::new()
-            .set_connection_timeout(timeouts.connect)
-            .set_response_timeout(timeouts.response);
+        // The builder's response timeout bounds the whole request, but with_config overwrites each node's
+        // response timeout with this one even when unset, so it has to be repeated here
+        let config = ClusterConfig::new().set_response_timeout(timeouts.response);
         Ok(Self::Cluster(
             builder
                 .build()?

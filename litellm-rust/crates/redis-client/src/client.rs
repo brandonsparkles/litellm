@@ -10,7 +10,8 @@ use redis::{
 };
 
 use crate::{
-    CallEvent, ConnectError, Endpoint, Error, Expiry, Namespace, Operation, Outcome, Pipeline,
+    CallEvent, ConnectError, Endpoint, Error, Expiry, FailureKind, Namespace, Operation, Outcome,
+    Pipeline,
     RedisConfig, RedisEvents, Script,
     commands::{self, ScriptCall},
     connection::Connection,
@@ -163,7 +164,7 @@ impl RedisClient {
                 self.observe(
                     operation,
                     started,
-                    Outcome::of::<()>(&Err(Error::BreakerOpen)),
+                    Outcome::Failed(FailureKind::BreakerOpen),
                 );
                 return (0..pipeline.len())
                     .map(|_| Err(Error::BreakerOpen))
@@ -178,10 +179,9 @@ impl RedisClient {
                 .filter(|error| matches!(error, Error::Transport(_)))
         });
         settle(admission, transport);
-        let outcome = match transport {
-            Some(error) => Outcome::of::<()>(&Err(Error::Transport(transport_source(error)))),
-            None => Outcome::Succeeded,
-        };
+        let outcome = transport.map_or(Outcome::Succeeded, |error| {
+            Outcome::Failed(FailureKind::of(error))
+        });
         self.observe(operation, started, outcome);
         results
     }
@@ -258,13 +258,6 @@ impl RedisClient {
                     .map_err(|_| Error::BreakerOpen)
             })
             .transpose()
-    }
-}
-
-fn transport_source(error: &Error) -> RedisError {
-    match error {
-        Error::Transport(source) | Error::Server(source) | Error::Decode(source) => source.clone(),
-        Error::BreakerOpen => unreachable!("only transport errors are passed here"),
     }
 }
 

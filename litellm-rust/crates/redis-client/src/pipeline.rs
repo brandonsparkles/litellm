@@ -17,6 +17,7 @@ pub struct Pipeline {
 struct Op {
     command: Cmd,
     key: String,
+    idempotent: bool,
 }
 
 type Settled = (usize, Result<Value, Error>);
@@ -31,22 +32,22 @@ impl Pipeline {
 
     pub fn get(self, key: &str) -> Self {
         let key = self.namespace.apply(key);
-        self.command(commands::get(key.clone()), key)
+        self.command(commands::get(key.clone()), key, true)
     }
 
     pub fn set(self, key: &str, value: impl ToSingleRedisArg, ttl: Duration) -> Self {
         let key = self.namespace.apply(key);
-        self.command(commands::set(key.clone(), value, ttl), key)
+        self.command(commands::set(key.clone(), value, ttl), key, true)
     }
 
     pub fn del(self, key: &str) -> Self {
         let key = self.namespace.apply(key);
-        self.command(commands::del(vec![key.clone()]), key)
+        self.command(commands::del(vec![key.clone()]), key, true)
     }
 
     pub fn expire(self, key: &str, ttl: Duration) -> Self {
         let key = self.namespace.apply(key);
-        self.command(commands::expire(key.clone(), ttl), key)
+        self.command(commands::expire(key.clone(), ttl), key, true)
     }
 
     pub fn incr_by(self, key: &str, delta: i64, expiry: Expiry) -> Self {
@@ -67,16 +68,20 @@ impl Pipeline {
     pub fn eval(self, script: &Script, keys: &[&str], args: impl ToRedisArgs) -> Self {
         let keys: Vec<String> = keys.iter().map(|key| self.namespace.apply(key)).collect();
         let key = keys.first().cloned().unwrap_or_default();
-        self.command(script.eval(&keys, &args.to_redis_args()), key)
+        self.command(script.eval(&keys, &args.to_redis_args()), key, false)
     }
 
     fn script_call(self, call: ScriptCall) -> Self {
         let key = call.keys.first().cloned().unwrap_or_default();
-        self.command(call.script.eval(&call.keys, &call.args), key)
+        self.command(call.script.eval(&call.keys, &call.args), key, false)
     }
 
-    fn command(mut self, command: Cmd, key: String) -> Self {
-        self.ops.push(Op { command, key });
+    fn command(mut self, command: Cmd, key: String, idempotent: bool) -> Self {
+        self.ops.push(Op {
+            command,
+            key,
+            idempotent,
+        });
         self
     }
 
@@ -89,7 +94,7 @@ impl Pipeline {
         let settled = join_all(
             groups
                 .iter()
-                .map(|group| self.run_group(connection.clone(), group)),
+                .map(|batches| self.run_in_order(connection, batches)),
         )
         .await;
         let mut settled: Vec<Settled> = settled.into_iter().flatten().collect();
@@ -97,21 +102,39 @@ impl Pipeline {
         settled.into_iter().map(|(_, result)| result).collect()
     }
 
-    fn groups(&self, connection: &Connection) -> Vec<Vec<usize>> {
+    async fn run_in_order(&self, connection: &Connection, batches: &[Vec<usize>]) -> Vec<Settled> {
+        let mut settled = Vec::with_capacity(batches.iter().map(Vec::len).sum());
+        for batch in batches {
+            settled.extend(self.run_group(connection.clone(), batch).await);
+        }
+        settled
+    }
+
+    fn groups(&self, connection: &Connection) -> Vec<Vec<Vec<usize>>> {
         match connection {
             _ if self.ops.is_empty() => Vec::new(),
-            Connection::Standalone(_) => vec![(0..self.ops.len()).collect()],
+            Connection::Standalone(_) => vec![vec![(0..self.ops.len()).collect()]],
             Connection::Cluster(_) => {
                 let mut by_slot: HashMap<Slot, Vec<usize>> = HashMap::new();
-                for (index, op) in self.ops.iter().enumerate() {
+                for index in 0..self.ops.len() {
                     by_slot
-                        .entry(Slot::for_key(&op.key))
+                        .entry(Slot::for_key(&self.ops[index].key))
                         .or_default()
                         .push(index);
                 }
-                by_slot.into_values().collect()
+                by_slot
+                    .into_values()
+                    .map(|indices| self.retry_safe_batches(indices))
+                    .collect()
             }
         }
+    }
+
+    fn retry_safe_batches(&self, indices: Vec<usize>) -> Vec<Vec<usize>> {
+        indices
+            .chunk_by(|&left, &right| self.ops[left].idempotent && self.ops[right].idempotent)
+            .map(<[usize]>::to_vec)
+            .collect()
     }
 
     async fn run_group(&self, mut connection: Connection, indices: &[usize]) -> Vec<Settled> {
