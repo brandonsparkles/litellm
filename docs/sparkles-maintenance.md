@@ -8,7 +8,7 @@ The base is v1.106.6, `61c6ab78393ef45683dd7d963d2a315bd845e20b`. The dependency
 
 ## LiteLLM wheel build and verification
 
-Build from clean committed source with `CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR=$HOME/Library/Caches/sparkles-builds/litellm nice -n 10 uv build --wheel --python 3.12 --out-dir <new-artifacts>/wheels`. The existing pinned Maturin backend emits an arm64 ABI3 wheel for all supported Python minors. Preserve the build log, source commit, wheel hash and installed package graph. The persistent target directory avoids repeating the first seventeen-minute native build
+Build from clean committed source with `bash scripts/build-security-wheel.sh <new-artifacts>/wheels`. The wrapper sets a persistent Cargo cache, four build jobs and reduced scheduling priority; explicit caller overrides remain supported. The existing pinned Maturin backend emits an arm64 ABI3 wheel for all supported Python minors. Preserve the build log, source commit, wheel hash and installed package graph. The persistent target directory avoids repeating the first seventeen-minute native build
 
 Import the installed native bridge on each supported Python minor, including filelock 4.2.4 at the minimum supported interpreter. Run the existing CLI settings and configure tests against the installed wheel. Scoped CLI qualification can stop conftest discovery at `tests/unit/proxy/client`; its one secret-vault fixture must come unchanged from the upstream proxy conftest and `FakeSecretVault` implementation. This avoids starting unrelated database integration fixtures. Record this qualification scope explicitly
 
