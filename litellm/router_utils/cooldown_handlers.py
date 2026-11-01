@@ -271,18 +271,13 @@ def _is_cooldown_required(
                 # Cool down 429 Rate Limit Errors
                 return True
 
-            elif exception_status in (401, 402, 408, 404):
-                return True
-
-            else:
-                # Do NOT cool down all other 4XX Errors
-                return False
+            return exception_status in (401, 402, 408, 404)
 
         else:
             # should cool down for all other errors
             return True
 
-    except Exception:
+    except Exception:  # noqa: BLE001 - Fail closed on provider status shapes until normalized before this boundary
         # Catch all - if any exceptions default to cooling down
         return True
 
@@ -390,7 +385,14 @@ def _should_run_cooldown_logic(
         verbose_router_logger.debug("Should Not Run Cooldown Logic: _is_cooldown_required returned False")
         return False
 
-    if deployment in litellm_router_instance.provider_default_deployment_ids:
+    if (
+        deployment in litellm_router_instance.provider_default_deployment_ids
+        and not _has_explicit_allowed_fails_policy_for_exception(
+            litellm_router_instance=litellm_router_instance,
+            deployment=deployment,
+            original_exception=original_exception,
+        )
+    ):
         verbose_router_logger.debug("Should Not Run Cooldown Logic: deployment is in provider_default_deployment_ids")
         return False
 
@@ -776,16 +778,14 @@ def _is_allowed_fails_set_on_router(
     """
     if litellm_router_instance.allowed_fails is None:
         return False
-    if litellm_router_instance.allowed_fails != litellm.allowed_fails:
-        return True
-    return False
+    return litellm_router_instance.allowed_fails != litellm.allowed_fails
 
 
 def cast_exception_status_to_int(exception_status: str | int) -> int:
     if isinstance(exception_status, str):
         try:
             exception_status = int(exception_status)
-        except Exception:
+        except ValueError:
             verbose_router_logger.debug(
                 "Unable to cast exception status to int %s. Defaulting to status=500.", exception_status
             )
