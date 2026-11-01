@@ -69,7 +69,6 @@ impl Connection {
             .set_connection_timeout(Some(timeouts.connect))
             .set_response_timeout(Some(timeouts.response))
             .set_number_of_retries(RECONNECT_RETRIES);
-        let info = info.set_tcp_settings(TcpSettings::default().set_nodelay(true));
         let manager = ConnectionManager::new_lazy_with_config(redis::Client::open(info)?, config)?;
         Ok(Self::Standalone(manager))
     }

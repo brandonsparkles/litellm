@@ -2,7 +2,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use redis::{
     ClientTlsConfig, ConnectionAddr, ConnectionInfo, IntoConnectionInfo, RedisConnectionInfo,
-    TlsCertificates, TlsMode,
+    TlsCertificates, TlsMode, io::tcp::TcpSettings,
 };
 
 use litellm_circuit_breaker::Breaker;
@@ -164,7 +164,8 @@ pub(crate) fn connection_info(
             unreachable!("cluster and sentinel endpoints build their own connection info")
         }
     };
-    let info = with_static_credentials(info, credentials);
+    let info = with_static_credentials(info, credentials)
+        .set_tcp_settings(TcpSettings::default().set_nodelay(true));
     match (tls, info.addr()) {
         (Some(tls), ConnectionAddr::TcpTls { .. }) => apply_tls(tls, info),
         _ => Ok(info),
