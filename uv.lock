@@ -15,7 +15,6 @@ exclude-newer-span = "P3D"
 
 [options.exclude-newer-package]
 brotli = "2026-10-22T14:01:00Z"
-pypdf = "2026-10-28T17:01:00Z"
 
 [manifest]
 members = [
