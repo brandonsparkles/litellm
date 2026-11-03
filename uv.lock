@@ -21,7 +21,6 @@ grpcio = "2026-10-22T15:00:00Z"
 mlflow = "2026-10-21T03:00:00Z"
 mlflow-skinny = "2026-10-21T03:00:00Z"
 mlflow-tracing = "2026-10-21T03:00:00Z"
-pypdf = "2026-10-28T17:01:00Z"
 
 [manifest]
 members = [
