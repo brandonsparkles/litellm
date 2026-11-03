@@ -386,8 +386,6 @@ brotli = "2026-10-22T14:01:00Z"
 mlflow = "2026-10-21T03:00:00Z"
 mlflow-skinny = "2026-10-21T03:00:00Z"
 mlflow-tracing = "2026-10-21T03:00:00Z"
-# TODO: remove after 2026-10-31, once pypdf 6.21.4 clears the 3-day window
-pypdf = "2026-10-28T17:01:00Z"
 
 [tool.uv.sources]
 litellm-proxy-extras = { workspace = true }
