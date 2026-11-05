@@ -324,14 +324,6 @@
         ],
         "./tests/unit/router_utils/test_cooldown_handlers.py": [
             {
-                "code": "reportUnusedImport",
-                "range": {
-                    "startColumn": 19,
-                    "endColumn": 24,
-                    "lineCount": 1
-                }
-            },
-            {
                 "code": "reportPrivateUsage",
                 "range": {
                     "startColumn": 4,
