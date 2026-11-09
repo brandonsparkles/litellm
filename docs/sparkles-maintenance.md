@@ -4,7 +4,7 @@
 
 ## LiteLLM source and dependency contract
 
-The base is v1.106.6, `61c6ab78393ef45683dd7d963d2a315bd845e20b`. The dependency change follows upstream fix `dacaaad72ed25663ad7f40941c48f653a45289be`. Both package manifests accept filelock 4.2.4 through 4.x and Python 3.11 through 3.14. The repository's existing three-day dependency aging rule remains active, so its lock selects 4.2.4 while the workstation runtime may select a newer qualified 4.x patch. Public version remains 1.106.6, with the full fork Git SHA identifying the patch
+The base is v1.108.2, `831a14c8f48e189e24a85b47da1b31b44e0718b6`; the patches were first carried on v1.106.6 (`61c6ab78393ef45683dd7d963d2a315bd845e20b`, branch `sparkles-security-1.106.6`) and rebased onto v1.108.2 on branch `rebase-1.108.2`. Upstream v1.108.2 still caps filelock below 4.0 and still allows Python 3.10, so the dependency patch remains required. The dependency change follows upstream fix `dacaaad72ed25663ad7f40941c48f653a45289be`. Both package manifests accept filelock 4.2.4 through 4.x and Python 3.11 through 3.14. The repository's existing three-day dependency aging rule remains active, so its lock selects 4.2.4 while the workstation runtime may select a newer qualified 4.x patch. Public version remains the upstream base version (1.108.2), with the full fork Git SHA identifying the patch
 
 ## LiteLLM wheel build and verification
 
@@ -26,7 +26,7 @@ Keep the same persistent Cargo cache and four-job bound when uv invokes Maturin.
 
 The managed wildcard cooldown patch honors explicit deployment exception policies. Multi-key NIM pools opt into immediate quarantine for rate limits, timeouts and server failures; single-key pools retain availability. Qualify each Chat Completions and Messages request with fresh proxy/provider state for each 429 and 503 case
 
-The fleet type gate starts from the two touched files at clean pre-patch commit `0d318e29a46996fd67176c3978a95d6e250f0fc6`, checked with basedpyright 1.40.2. Its initial committed baseline contains only those existing upstream diagnostics, never diagnostics from the cooldown patch. New diagnostics remain blocking. Use a local `.venv` pointing at a permanent wheel-based development environment with the proxy extra and required pytest plugins; otherwise the generic gate rebuilds the whole editable native project for focused tests
+The fleet type gate starts from the two touched files at the clean upstream base (v1.108.2 `831a14c8f48e189e24a85b47da1b31b44e0718b6`; originally pre-patch commit `0d318e29a46996fd67176c3978a95d6e250f0fc6` on v1.106.6), checked with basedpyright 1.40.2. Regenerate it from the clean upstream files on every rebase, then check the patched files with `--baselinemode=discard`. Its initial committed baseline contains only those existing upstream diagnostics, never diagnostics from the cooldown patch. New diagnostics remain blocking. Use a local `.venv` pointing at a permanent wheel-based development environment with the proxy extra and required pytest plugins; otherwise the generic gate rebuilds the whole editable native project for focused tests
 
 ## LiteLLM registered tool directory and test isolation
 
