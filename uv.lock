@@ -6,7 +6,8 @@ resolution-markers = [
     "python_full_version == '3.14.*'",
     "python_full_version == '3.13.*'",
     "python_full_version == '3.12.*'",
-    "python_full_version < '3.12'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12'",
+    "python_full_version < '3.11.5'",
 ]
 
 [options]
@@ -25,7 +26,7 @@ constraints = [
     { name = "httplib2", specifier = ">=0.32.0" },
     { name = "packaging", specifier = ">=24.0" },
     { name = "setuptools", specifier = ">=84.1.0" },
-    { name = "soupsieve", specifier = ">=2.8.4" },
+    { name = "soupsieve", marker = "python_full_version >= '3.11.5'", specifier = ">=4.0.0" },
     { name = "tornado", specifier = ">=6.5.8" },
     { name = "tornado", marker = "python_full_version >= '3.11'", specifier = ">=6.6" },
 ]
@@ -2354,7 +2355,8 @@ source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version == '3.13.*'",
     "python_full_version == '3.12.*'",
-    "python_full_version < '3.12'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12'",
+    "python_full_version < '3.11.5'",
 ]
 dependencies = [
     { name = "google-auth" },
@@ -2579,7 +2581,8 @@ source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version == '3.13.*'",
     "python_full_version == '3.12.*'",
-    "python_full_version < '3.12'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12'",
+    "python_full_version < '3.11.5'",
 ]
 dependencies = [
     { name = "google-api-core", version = "2.30.3", source = { registry = "https://pypi.org/simple" } },
@@ -4602,7 +4605,7 @@ ci = [
     { name = "anthropic" },
     { name = "argon2-cffi" },
     { name = "assemblyai" },
-    { name = "beautifulsoup4" },
+    { name = "beautifulsoup4", marker = "python_full_version >= '3.11.5'" },
     { name = "blockbuster" },
     { name = "claude-agent-sdk" },
     { name = "detect-secrets" },
@@ -4828,7 +4831,7 @@ ci = [
     { name = "anthropic", specifier = "==0.84.0" },
     { name = "argon2-cffi", specifier = "==25.1.0" },
     { name = "assemblyai", specifier = "==0.52.4" },
-    { name = "beautifulsoup4", specifier = "==4.14.3" },
+    { name = "beautifulsoup4", marker = "python_full_version >= '3.11.5'", specifier = "==4.14.3" },
     { name = "blockbuster", specifier = "==1.5.26" },
     { name = "claude-agent-sdk", specifier = "==0.2.165" },
     { name = "detect-secrets", specifier = "==1.5.0" },
@@ -5887,7 +5890,8 @@ name = "numpy"
 version = "1.26.4"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version < '3.12'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12'",
+    "python_full_version < '3.11.5'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/65/6e/09db70a523a96d25e115e71cc56a6f9031e7b8cd166c1ac8438307c14058/numpy-1.26.4.tar.gz", hash = "sha256:2a02aba9ed12e4ac4eb3ea9421c420301a0c6460d9830d74a9df87efa4912010", size = 15786129, upload-time = "2024-02-06T00:26:44.495Z" }
 wheels = [
@@ -9259,11 +9263,11 @@ wheels = [
 
 [[package]]
 name = "soupsieve"
-version = "2.9.2"
+version = "4.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/69/99/a6ca3beb3ccacb41fb3321d8a60e5566f9e6467601ef8eba6a17e1b89778/soupsieve-2.9.2.tar.gz", hash = "sha256:4a55d8cf158a9c2e587fa4922f1bbb91d68ac829e2d6f25403a85747c71daf74", size = 122445, upload-time = "2026-08-07T00:57:24.801Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/95/48/21a393ff731b8f928fa4f8176f9a7ceba2252ee60a5149f25b45c292aa5c/soupsieve-4.1.tar.gz", hash = "sha256:ca9abf7126667010d8f6e9b39bfc1bc3b23c8aed9bcb0f54a754dde969bb8aab", size = 161955, upload-time = "2026-11-10T01:59:50.399Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/eb/dc/ad025c1ee131eba60c69f4dd5779b18fcf1e6b21a343e2162a84d5d133c7/soupsieve-2.9.2-py3-none-any.whl", hash = "sha256:8089a26fd974ca7a1f30276d3d8492ab266ab15af581642dfe8aa162e0c1c823", size = 37370, upload-time = "2026-08-07T00:57:23.524Z" },
+    { url = "https://files.pythonhosted.org/packages/88/73/6a2087c72975cfc07394623bca8d17654342ea4055ae368deafe5a81a542/soupsieve-4.1-py3-none-any.whl", hash = "sha256:e4d667b3974ce6e038e7390486b8093369854a1d345ffdd4c121dfc4a782e809", size = 52302, upload-time = "2026-11-10T01:59:48.571Z" },
 ]
 
 [[package]]
@@ -9271,7 +9275,8 @@ name = "sphinx"
 version = "9.0.4"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version < '3.12'",
+    "python_full_version >= '3.11.5' and python_full_version < '3.12'",
+    "python_full_version < '3.11.5'",
 ]
 dependencies = [
     { name = "alabaster" },
