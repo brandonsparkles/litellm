@@ -188,3 +188,77 @@ async def test_an_increment_counted_after_retire_still_reaches_redis():
     finally:
         server.shutdown()
         server.server_close()
+
+
+class _RecordingRedisCache:
+    def __init__(self) -> None:
+        self.increment_lists: list[list[RedisPipelineIncrementOperation]] = []
+
+    async def async_increment_pipeline(self, increment_list: list[RedisPipelineIncrementOperation]) -> list[float]:
+        self.increment_lists.append(list(increment_list))
+        return [float(op["increment_value"]) for op in increment_list]
+
+
+def _sync_task_count() -> int:
+    return sum(
+        1
+        for t in asyncio.all_tasks()
+        if getattr(t.get_coro(), "__qualname__", "") == "BaseRoutingStrategy.periodic_sync_in_memory_spend_with_redis"
+    )
+
+
+def test_sync_construction_keeps_the_callers_current_event_loop():
+    caller_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(caller_loop)
+    try:
+        BaseRoutingStrategy(dual_cache=DualCache(), should_batch_redis_writes=True, default_sync_interval=1)
+        assert asyncio.get_event_loop() is caller_loop
+    finally:
+        asyncio.set_event_loop(None)
+        caller_loop.close()
+
+
+def test_sync_constructed_strategy_flushes_increments_to_redis_once_used_in_a_loop():
+    redis_cache = _RecordingRedisCache()
+    strategy = BaseRoutingStrategy(
+        dual_cache=DualCache(redis_cache=redis_cache),  # pyright: ignore[reportArgumentType]  # recording stub
+        should_batch_redis_writes=True,
+        default_sync_interval=0.01,
+    )
+
+    async def use_in_loop() -> None:
+        await strategy._increment_value_in_current_window(  # pyright: ignore[reportPrivateUsage]  # the async path that arms the sync
+            key="rpm-key", value=2, ttl=60
+        )
+        for _ in range(200):
+            if redis_cache.increment_lists:
+                break
+            await asyncio.sleep(0.01)
+        await strategy.cleanup()
+
+    asyncio.run(use_in_loop())
+
+    assert redis_cache.increment_lists == [[RedisPipelineIncrementOperation(key="rpm-key", increment_value=2, ttl=60)]]
+
+
+async def test_strategy_built_in_a_running_loop_syncs_with_one_task():
+    strategy = BaseRoutingStrategy(dual_cache=DualCache(), should_batch_redis_writes=True, default_sync_interval=1)
+    try:
+        assert _sync_task_count() == 1
+        await strategy._increment_value_in_current_window(  # pyright: ignore[reportPrivateUsage]  # the async path that arms the sync
+            key="rpm-key", value=1, ttl=60
+        )
+        assert _sync_task_count() == 1
+    finally:
+        await strategy.cleanup()
+
+
+async def test_retired_strategy_does_not_restart_its_sync_task_on_a_late_increment():
+    strategy = BaseRoutingStrategy(dual_cache=DualCache(), should_batch_redis_writes=True, default_sync_interval=1)
+    await strategy.cleanup()
+
+    await strategy._increment_value_in_current_window(  # pyright: ignore[reportPrivateUsage]  # the async path that arms the sync
+        key="rpm-key", value=1, ttl=60
+    )
+
+    assert _sync_task_count() == 0

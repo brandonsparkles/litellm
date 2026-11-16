@@ -24,6 +24,8 @@ class BaseRoutingStrategy(ABC):
         self.dual_cache = dual_cache
         self.redis_increment_operation_queue: list[RedisPipelineIncrementOperation] = []
         self._sync_task: asyncio.Task[None] | None = None
+        self._sync_interval: float | None = default_sync_interval
+        self._sync_wanted: bool = False
         self._retired = False
         self._flush_after_retire: asyncio.Task[None] | None = None
         if should_batch_redis_writes:
@@ -32,18 +34,31 @@ class BaseRoutingStrategy(ABC):
         self.in_memory_keys_to_update: set[str] = set()  # Set with max size of 1000 keys
 
     def setup_sync_task(self, default_sync_interval: float | None):
-        """Setup the sync task in a way that's compatible with FastAPI"""
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        """
+        Setup the sync task in a way that's compatible with FastAPI
 
+        Starts on the running loop. With no running loop it starts on the first async increment instead,
+        so construction never creates or installs an event loop.
+        """
+        self._sync_interval = default_sync_interval
+        self._sync_wanted = True
+        self._ensure_sync_task()
+
+    def _ensure_sync_task(self) -> None:
+        if not self._sync_wanted:
+            return
+        if self._sync_task is not None and not self._sync_task.done() and not self._sync_task.get_loop().is_closed():
+            return
+        try:
+            loop: Final = asyncio.get_running_loop()
+        except RuntimeError:
+            return
         self._sync_task = loop.create_task(
-            self.periodic_sync_in_memory_spend_with_redis(default_sync_interval=default_sync_interval)
+            self.periodic_sync_in_memory_spend_with_redis(default_sync_interval=self._sync_interval)
         )
 
     def cancel_sync_task(self) -> None:
+        self._sync_wanted = False
         if self._sync_task is not None:
             self._sync_task.cancel()
 
@@ -99,6 +114,7 @@ class BaseRoutingStrategy(ABC):
         - Increments the spend in memory cache (so spend instantly updated in memory)
         - Queues the increment operation to Redis Pipeline (using batched pipeline to optimize performance. Using Redis for multi instance environment of LiteLLM)
         """
+        self._ensure_sync_task()
         result: Final = await self.dual_cache.in_memory_cache.async_increment(
             key=key,
             value=value,
