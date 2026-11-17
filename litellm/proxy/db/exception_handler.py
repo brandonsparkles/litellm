@@ -1,3 +1,4 @@
+import importlib
 import re
 from collections.abc import Awaitable, Callable, Iterator
 from http import HTTPStatus
@@ -91,6 +92,19 @@ def _exception_types(*candidates: object) -> tuple[type[BaseException], ...]:
     False. Dropping the non-types lets the call fall through to the other checks.
     """
     return tuple(c for c in candidates if isinstance(c, type) and issubclass(c, BaseException))
+
+
+def _prisma_installed() -> bool:
+    """False on a proxy installed without prisma (the ``proxy`` extra does not pull it in).
+
+    Such a proxy has no database, so no exception can be a database outage and the
+    predicates that need prisma's classes must answer False instead of raising
+    ``ModuleNotFoundError`` from inside an error handler."""
+    try:
+        importlib.import_module("prisma")
+    except ImportError:
+        return False
+    return True
 
 
 def _prisma_error_code(e: Exception) -> str | None:
@@ -468,6 +482,8 @@ class PrismaDBExceptionHandler:
         """
         import asyncio
 
+        if not _prisma_installed():
+            return False
         if PrismaDBExceptionHandler.is_database_infrastructure_error(e):
             return True
         if PrismaDBExceptionHandler.is_database_transport_error(e):
