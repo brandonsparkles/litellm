@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 from collections.abc import Mapping
 from typing import Final
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1283,6 +1284,17 @@ async def test_handle_authentication_error_keeps_internal_message_on_model_acces
     assert "internal-models" not in str(exc_info.value.message)
     assert exc_info.value.internal_message == denial.internal_message
     assert [r for r in caplog.records if r.levelname == "WARNING" and "internal-models" in r.getMessage()] == []
+
+
+def test_as_proxy_exception_answers_401_for_a_missing_key_when_prisma_is_not_installed() -> None:
+    with patch.dict(sys.modules, {"prisma": None}):
+        converted = _as_proxy_exception(Exception("No api key passed in."))
+
+    assert (converted.code, converted.type, converted.message) == (
+        str(status.HTTP_401_UNAUTHORIZED),
+        ProxyErrorTypes.auth_error,
+        "Authentication Error, No api key passed in.",
+    )
 
 
 def test_as_proxy_exception_keeps_jwt_scope_denial_message_shape():

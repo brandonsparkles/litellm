@@ -725,6 +725,20 @@ def test_connection_error_answers_when_prisma_is_mocked_after_import():
         assert PrismaDBExceptionHandler.is_database_connection_error(httpx.ConnectError("refused")) is True
 
 
+@pytest.mark.parametrize(
+    "error",
+    [Exception("No api key passed in."), OSError("boom"), httpx.ConnectError("refused")],
+    ids=["Exception", "OSError", "ConnectError"],
+)
+def test_a_proxy_installed_without_prisma_never_reports_a_database_outage(error: Exception) -> None:
+    """The ``proxy`` extra does not install prisma. On such a proxy the error handlers
+    must answer instead of raising ModuleNotFoundError, or every rejected request is a 500."""
+    with patch.dict(sys.modules, {"prisma": None}):
+        assert PrismaDBExceptionHandler.is_database_service_unavailable_error(error) is False
+        assert PrismaDBExceptionHandler.is_database_service_unavailable_error_in_chain(error) is False
+        assert PrismaDBExceptionHandler.find_database_service_unavailable_error_in_chain(error) is None
+
+
 def test_db_lookup_deadline_is_a_connection_and_unavailability_error_but_never_a_transport_error():
     """A lookup that hit its deadline fails the request as a 503 and counts as a
     DB outage for ``allow_requests_on_db_unavailable``, but it must not be read
