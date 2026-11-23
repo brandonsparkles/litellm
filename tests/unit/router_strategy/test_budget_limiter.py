@@ -6,12 +6,14 @@ anthropic_messages, embedding and rerank surfaces leave it unset, which used to 
 the callback raise before any spend was recorded, so those budgets never moved.
 """
 
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from functools import partial
 from typing import Final
 
 import litellm
 import pytest
+from pydantic import TypeAdapter
 
 from litellm import Router
 from litellm.caching.caching import DualCache
@@ -666,3 +668,112 @@ async def test_batch_charge_is_shared_across_workers_and_requires_redis_confirma
     await second._push_in_memory_increments_to_redis()
     assert float(await client.get("provider_spend:openai:1d")) == 0.5
     await client.aclose()
+
+
+def _budget_sync_task_count() -> int:
+    return sum(
+        1
+        for task in asyncio.all_tasks()
+        if getattr(task.get_coro(), "__qualname__", "")
+        == "RouterBudgetLimiting.periodic_sync_in_memory_spend_with_redis"
+    )
+
+
+async def _until(condition: Callable[[], Awaitable[bool]]) -> None:
+    for _ in range(500):
+        if await condition():
+            return
+        await asyncio.sleep(0.01)
+
+
+_CACHED_NUMBER: Final = TypeAdapter[float | None](float | None)
+_REDIS_VALUE: Final = TypeAdapter[bytes | None](bytes | None)
+
+
+async def _cached(limiter: RouterBudgetLimiting, key: str) -> float | None:
+    return _CACHED_NUMBER.validate_python(
+        await limiter.dual_cache.async_get_cache(key)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # DualCache.async_get_cache leaves key untyped
+    )
+
+
+def test_router_with_budget_limiting_builds_without_a_running_loop_and_inits_budgets_on_first_use():
+    router: Final = Router(
+        model_list=[{"model_name": "gpt", "litellm_params": {"model": "openai/gpt-4o", "api_key": "fake-key"}}],
+        optional_pre_call_checks=["router_budget_limiting"],
+        provider_budget_config={"openai": BudgetConfig(budget_limit=10.0, time_period="1d")},
+    )
+    limiter: Final = router.router_budget_logger
+    assert limiter is not None
+
+    async def first_request() -> float | None:
+        await limiter.async_filter_deployments(  # pyright: ignore[reportUnknownMemberType]  # healthy_deployments is a bare list in the callee
+            model="gpt",
+            healthy_deployments=[{"model_name": "gpt", "litellm_params": {"model": "openai/gpt-4o"}}],
+            messages=None,
+        )
+
+        async def start_time_set() -> bool:
+            return await _cached(limiter, "provider_budget_start_time:openai") is not None
+
+        await _until(start_time_set)
+        start_time: Final = await _cached(limiter, "provider_budget_start_time:openai")
+        limiter.retire()
+        return start_time
+
+    assert asyncio.run(first_request()) is not None
+
+
+def test_a_limiter_built_without_a_running_loop_syncs_spend_to_redis_once_used_in_one(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from fakeredis import FakeRedis as FakeSyncRedis
+    from fakeredis import FakeServer
+    from fakeredis.aioredis import FakeRedis
+
+    from litellm.caching.redis_cache import RedisCache
+
+    monkeypatch.setattr("litellm.router_strategy.budget_limiter.DEFAULT_REDIS_SYNC_INTERVAL", 0.01)
+    server: Final = FakeServer()
+    redis_cache: Final = RedisCache(
+        host="router-sync-build-fixture",
+        connection_pool=FakeSyncRedis(server=server).connection_pool,  # pyright: ignore[reportAny]  # fakeredis ships untyped
+    )
+    limiter: Final = RouterBudgetLimiting(
+        dual_cache=DualCache(redis_cache=redis_cache),
+        provider_budget_config={"openai": BudgetConfig(budget_limit=100, time_period="1d")},
+    )
+
+    async def spend_once() -> bytes | None:
+        client: Final = FakeRedis(server=server)
+        litellm.in_memory_llm_clients_cache.set_cache(  # pyright: ignore[reportUnknownMemberType]  # set_cache **kwargs are untyped
+            key=redis_cache._get_async_client_cache_key(),  # pyright: ignore[reportPrivateUsage]  # same wiring as the batch charge test above
+            value=client,
+        )
+        await _log_success(limiter, _success_kwargs(provider_in_litellm_params=None, provider_in_payload="openai"))
+
+        async def spend_in_redis() -> bool:
+            return _REDIS_VALUE.validate_python(await client.get("provider_spend:openai:1d")) is not None
+
+        await _until(spend_in_redis)
+        limiter.retire()
+        return _REDIS_VALUE.validate_python(await client.get("provider_spend:openai:1d"))
+
+    spend: Final = asyncio.run(spend_once())
+
+    assert spend is not None and float(spend) == 0.25
+
+
+async def test_a_retired_limiter_stops_its_redis_sync_and_a_late_request_does_not_restart_it():
+    limiter: Final = RouterBudgetLimiting(
+        dual_cache=DualCache(),
+        provider_budget_config={"openai": BudgetConfig(budget_limit=10.0, time_period="1d")},
+    )
+    await _log_success(limiter, _success_kwargs(provider_in_litellm_params=None, provider_in_payload="openai"))
+    running_before_retire: Final = _budget_sync_task_count()
+
+    limiter.retire()
+    await asyncio.sleep(0)
+    await _log_success(limiter, _success_kwargs(provider_in_litellm_params=None, provider_in_payload="openai"))
+    await asyncio.sleep(0)
+
+    assert (running_before_retire, _budget_sync_task_count()) == (1, 0)

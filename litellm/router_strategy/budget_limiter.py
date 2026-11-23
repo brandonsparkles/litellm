@@ -147,6 +147,11 @@ def budget_window_seconds(started_at: float, budget_duration: str) -> int:
 
 
 class RouterBudgetLimiting(CustomLogger):
+    _sync_wanted: bool = False
+    _sync_task: asyncio.Task[None] | None = None
+    _pending_provider_budget_inits: tuple[tuple[str, GenericBudgetInfo], ...] = ()
+    _provider_budget_init_tasks: tuple[asyncio.Task[None], ...] = ()
+
     def __init__(
         self,
         dual_cache: DualCache,
@@ -160,7 +165,6 @@ class RouterBudgetLimiting(CustomLogger):
         self._redis_increment_queue_lock = asyncio.Lock()
         self._redis_increment_flush_lock = asyncio.Lock()
         self._detached_increment_operations: tuple[RedisPipelineIncrementOperation, ...] | None = None
-        self._sync_task: asyncio.Task[None] = asyncio.create_task(self.periodic_sync_in_memory_spend_with_redis())
         self._retired = False
         self._flush_after_retire: asyncio.Task[None] | None = None
         self.provider_budget_config: GenericBudgetConfigType | None = provider_budget_config
@@ -169,13 +173,37 @@ class RouterBudgetLimiting(CustomLogger):
         self._init_provider_budgets()
         self._init_deployment_budgets(model_list=model_list)
         self._init_tag_budgets()
+        self._sync_wanted = True
+        self._ensure_background_tasks()
 
         # Add self to litellm callbacks if it's a list
         if isinstance(litellm.callbacks, list):
             litellm.logging_callback_manager.add_litellm_callback(self)
 
+    def _ensure_background_tasks(self) -> None:
+        """
+        Starts the Redis spend sync and the provider budget cache init on the running loop. A limiter built with no
+        running loop (sync Router construction) starts them on its first async use instead
+        """
+        if not self._sync_wanted:
+            return
+        try:
+            loop: Final = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self._sync_task is None or self._sync_task.done() or self._sync_task.get_loop().is_closed():
+            self._sync_task = loop.create_task(self.periodic_sync_in_memory_spend_with_redis())
+        if self._pending_provider_budget_inits:
+            self._provider_budget_init_tasks = tuple(
+                loop.create_task(self._init_provider_budget_in_cache(provider=provider, budget_config=budget_config))
+                for provider, budget_config in self._pending_provider_budget_inits
+            )
+            self._pending_provider_budget_inits = ()
+
     def retire(self) -> None:
-        self._sync_task.cancel()
+        self._sync_wanted = False
+        if self._sync_task is not None:
+            self._sync_task.cancel()
         self._retired = True
         self._schedule_flush_after_retire()
 
@@ -217,6 +245,7 @@ class RouterBudgetLimiting(CustomLogger):
                 then skip this deployment
         """
 
+        self._ensure_background_tasks()
         # If a single deployment is passed, convert it to a list
         if isinstance(healthy_deployments, dict):
             healthy_deployments = [healthy_deployments]
@@ -471,6 +500,7 @@ class RouterBudgetLimiting(CustomLogger):
         - Queues the increment for the batched Redis pipeline when Redis is configured, since only a multi instance
           deployment has anything to sync
         """
+        self._ensure_background_tasks()
         increment_op: Final = RedisPipelineIncrementOperation(
             key=spend_key,
             increment_value=response_cost,
@@ -959,13 +989,8 @@ class RouterBudgetLimiting(CustomLogger):
                         budget_limit=config.get("budget_limit"),
                         time_period=config.get("time_period"),
                     )
-                asyncio.create_task(
-                    self._init_provider_budget_in_cache(
-                        provider=provider,
-                        budget_config=self.provider_budget_config[provider],
-                    )
-                )
 
+            self._pending_provider_budget_inits = tuple(self.provider_budget_config.items())
             verbose_router_logger.debug("Initalized Provider budget config: %s", self.provider_budget_config)
 
     def _init_deployment_budgets(
