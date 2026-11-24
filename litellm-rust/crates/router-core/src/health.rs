@@ -430,6 +430,12 @@ impl Health {
         failure: &AttemptError,
         cooldown: Duration,
     ) -> bool {
+        // A wildcard (provider default) deployment never cools down, unless its own
+        // allowed_fails_policy names this failure: that entry is the deployment's explicit opt-in
+        // (multi-key pools quarantine a failed key that way).
+        let policy_names_failure =
+            deployment_allowed_fails(deployment.model_info.allowed_fails_policy.as_ref(), failure)
+                .is_some();
         !matches!(
             failure.kind,
             FailureKind::Declined
@@ -438,15 +444,11 @@ impl Health {
         ) && !failure.caller_scoped
             && !cooldown.is_zero()
             && !settings.disable_cooldowns
-            && (is_cooldown_required(failure)
-                || deployment_allowed_fails(
-                    deployment.model_info.allowed_fails_policy.as_ref(),
-                    failure,
-                )
-                .is_some())
-            && !settings
-                .provider_default_deployment_ids
-                .contains(&deployment.id)
+            && (is_cooldown_required(failure) || policy_names_failure)
+            && (policy_names_failure
+                || !settings
+                    .provider_default_deployment_ids
+                    .contains(&deployment.id))
     }
 
     /// `_should_cooldown_deployment`.
@@ -919,6 +921,53 @@ mod tests {
 
         assert_eq!(cooldown.is_some(), cooled);
         assert_eq!(health.outcomes_this_minute("a").await.unwrap().1, 1);
+    }
+
+    /// A wildcard (provider default) deployment keeps upstream's never-cool-down default, but its
+    /// own allowed_fails_policy entry naming the failure opts it into cooldown.
+    #[rstest]
+    #[case::wildcard_without_a_policy(serde_json::json!({}), true, false)]
+    #[case::wildcard_whose_policy_names_the_error(
+        serde_json::json!({"allowed_fails_policy": {"RateLimitErrorAllowedFails": 0}}),
+        true,
+        true
+    )]
+    #[case::wildcard_whose_policy_names_another_error(
+        serde_json::json!({"allowed_fails_policy": {"TimeoutErrorAllowedFails": 0}}),
+        true,
+        false
+    )]
+    #[case::a_named_deployment_without_a_policy(serde_json::json!({}), false, true)]
+    #[tokio::test]
+    async fn a_wildcard_deployment_cools_down_only_when_its_policy_opts_in(
+        #[case] info: serde_json::Value,
+        #[case] provider_default: bool,
+        #[case] cooled: bool,
+    ) {
+        let config = RouterConfig {
+            provider_default_deployment_ids: if provider_default {
+                vec!["a".to_owned()]
+            } else {
+                Vec::new()
+            },
+            ..RouterConfig::default()
+        };
+        let settings = Settings::new(&config, Arc::new(RouterDynamicConfig::default()));
+        let deployment = Deployment::from_spec(deployment("a", info)).unwrap();
+        let failure = AttemptError::new(FailureKind::RateLimit, Some(429));
+
+        let cooldown = health()
+            .record_failure(
+                &settings,
+                &deployment,
+                GroupShape::default(),
+                None,
+                &failure,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(cooldown.is_some(), cooled);
     }
 
     #[rstest]
